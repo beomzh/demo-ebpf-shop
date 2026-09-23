@@ -47,6 +47,10 @@ spec:
     metadata:
       labels: { app: courier-dns }
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: coredns
           image: registry.k8s.io/coredns/coredns:v1.11.3
@@ -54,6 +58,10 @@ spec:
           ports:
             - { name: dns-udp, containerPort: 1053, protocol: UDP }
             - { name: dns-tcp, containerPort: 1053, protocol: TCP }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
           resources:
             requests: { cpu: 10m, memory: 32Mi }
             limits: { memory: 128Mi }

@@ -1,0 +1,105 @@
+# 서비스 간 인바운드(ingress) 격리 — 필요한 호출 경로만 연다.
+# (데모 사건과 무관한 보안 기본값. "방화벽" 장면에서 보여주는 egress 규칙과는 라벨로 구분한다)
+#
+#   demo-infra/loadgen ──▶ order ──▶ member ──▶ mysql
+#                               ├──▶ product
+#                               ├──▶ payment
+#                               └──▶ delivery ──▶ demo-infra/courier-dns
+#
+# eBPF 노드 에이전트는 커널에서 관찰하므로 이 정책과 무관하게 수집된다.
+# kubelet 의 tcpSocket 프로브는 노드에서 오는 트래픽으로, OVN-Kubernetes·Calico 모두 허용한다.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: shop
+  labels: { demo.observ/policy: isolation }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-order-from-loadgen
+  namespace: shop
+  labels: { demo.observ/policy: isolation }
+spec:
+  podSelector:
+    matchLabels: { app: order-service }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: demo-infra }
+          podSelector:
+            matchLabels: { app: loadgen }
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-backends-from-order
+  namespace: shop
+  labels: { demo.observ/policy: isolation }
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [member-service, product-service, payment-service, delivery-service]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: order-service }
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-mysql-from-member
+  namespace: shop
+  labels: { demo.observ/policy: isolation }
+spec:
+  podSelector:
+    matchLabels: { app: mysql }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: member-service }
+      ports:
+        - { protocol: TCP, port: 3306 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: demo-infra
+  labels: { demo.observ/policy: isolation }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-courier-dns-from-delivery
+  namespace: demo-infra
+  labels: { demo.observ/policy: isolation }
+spec:
+  podSelector:
+    matchLabels: { app: courier-dns }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: shop }
+          podSelector:
+            matchLabels: { app: delivery-service }
+      ports:
+        - { protocol: UDP, port: 1053 }
+        - { protocol: TCP, port: 1053 }

@@ -1,11 +1,17 @@
 # shop       : 데모 주인공 — 다섯 서비스 + MySQL (Observ 에서는 이 네임스페이스로 필터링)
 # demo-infra : 데모 장치 — 부하 발생기, 택배사 도메인 DNS (화면에 나오지 않게 분리)
+#
+# Pod Security "restricted" 를 enforce 한다. 모든 파드는 OpenShift restricted-v2 SCC 로 동작하며
+# 특권(privileged) 권한이 필요한 것은 Observ 노드 에이전트뿐이다 (이 저장소 밖에서 설치).
 apiVersion: v1
 kind: Namespace
 metadata:
   name: shop
   labels:
     demo.observ/role: app
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
 ---
 apiVersion: v1
 kind: Namespace
@@ -13,3 +19,6 @@ metadata:
   name: demo-infra
   labels:
     demo.observ/role: infra
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

@@ -9,12 +9,22 @@ K="$ROOT/k8s"
 info "namespaces"
 kubectl apply -f "$K/00-namespaces.yaml"
 
-if [[ -f "$ROOT/courier-ext/certs/ca.crt" ]]; then
-  info "courier-ca secret (택배사 사설 CA)"
-  kubectl -n "$APP_NS" create secret generic courier-ca \
-    --from-file=ca.crt="$ROOT/courier-ext/certs/ca.crt" --dry-run=client -o yaml | kubectl apply -f -
+[[ -f "$ROOT/courier-ext/certs/ca.crt" ]] \
+  || die "courier-ext/certs/ca.crt 가 없습니다. 'make certs' 로 만들고 택배사 호스트에도 같은 인증서를 배포하세요."
+info "courier-ca secret (택배사 사설 CA — 공개 인증서만 올리고 ca.key 는 올리지 않음)"
+kubectl -n "$APP_NS" create secret generic courier-ca \
+  --from-file=ca.crt="$ROOT/courier-ext/certs/ca.crt" --dry-run=client -o yaml | kubectl apply -f -
+
+# MySQL 접속 정보는 git 에 두지 않는다. 처음 배포할 때 무작위로 만들고 이후에는 그대로 둔다.
+if kubectl -n "$APP_NS" get secret mysql-auth >/dev/null 2>&1; then
+  info "mysql-auth secret 이미 있음 (유지)"
 else
-  warn "courier-ext/certs/ca.crt 가 없어 courier-ca 시크릿을 건너뜁니다 (배송 서비스는 인증서 검증 없이 동작)."
+  info "mysql-auth secret 생성 (무작위 비밀번호)"
+  kubectl -n "$APP_NS" create secret generic mysql-auth \
+    --from-literal=MYSQL_USER=shop \
+    --from-literal=MYSQL_DATABASE=shop \
+    --from-literal=MYSQL_PASSWORD="$(openssl rand -hex 16)" \
+    --from-literal=MYSQL_ROOT_PASSWORD="$(openssl rand -hex 16)" >/dev/null
 fi
 
 info "courier-dns (택배사 도메인 → ${COURIER_OLD_IP})"
@@ -29,8 +39,11 @@ render "$K/10-mysql.yaml" | kubectl apply -f -
 render "$K/20-services.yaml" | kubectl apply -f -
 render "$K/30-delivery.yaml" "$dns_ip" | kubectl apply -f -
 
-info "방화벽 (배송 서비스 egress: 클러스터 내부 + ${COURIER_OLD_IP}:443)"
+info "방화벽 (배송 서비스 egress: 택배사 DNS + ${COURIER_OLD_IP}:443)"
 render "$K/50-firewall.yaml" | kubectl apply -f -
+
+info "서비스 간 인바운드 격리 (필요한 호출 경로만 허용)"
+render "$K/55-network-isolation.yaml" | kubectl apply -f -
 
 info "rollout 대기"
 kubectl -n "$APP_NS" rollout status deploy/mysql --timeout=300s
@@ -42,4 +55,4 @@ info "loadgen (주문 서비스로 트래픽 발생)"
 render "$K/60-loadgen.yaml" | kubectl apply -f -
 kubectl -n "$INFRA_NS" rollout status deploy/loadgen --timeout=120s
 
-ok "배포 완료. 상태 확인: ./scripts/scenario.sh status"
+ok "배포 완료. 상태 확인: make status / 보안 점검: make security"

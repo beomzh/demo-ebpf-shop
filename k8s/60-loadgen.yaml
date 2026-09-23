@@ -58,6 +58,10 @@ spec:
     metadata:
       labels: { app: loadgen }
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: loadgen
           image: curlimages/curl:8.10.1
@@ -66,6 +70,10 @@ spec:
             - { name: ORDER_URL, value: "http://order-service.shop.svc.cluster.local:8080" }
             - { name: ORDER_INTERVAL, value: "__LOADGEN_ORDER_INTERVAL__" }
             - { name: TRACKING_INTERVAL, value: "__LOADGEN_TRACKING_INTERVAL__" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
           resources:
             requests: { cpu: 20m, memory: 32Mi }
             limits: { memory: 128Mi }

@@ -38,14 +38,22 @@ TRACKING_PATH = re.compile(r"^/deliveries/(\d+)/tracking$")
 
 
 def build_ssl_context() -> ssl.SSLContext:
+    # 기본은 fail-closed: CA 파일이 없으면 기동하지 않는다.
+    # 검증 없이 띄우려면 COURIER_TLS_INSECURE=true 를 명시해야 한다 (로컬 실험용).
     if COURIER_CA_FILE and os.path.isfile(COURIER_CA_FILE):
         log.info("courier TLS: verifying with CA %s", COURIER_CA_FILE)
-        return ssl.create_default_context(cafile=COURIER_CA_FILE)
-    log.warning("courier TLS: CA file %s not found, certificate verification DISABLED", COURIER_CA_FILE)
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+        ctx = ssl.create_default_context(cafile=COURIER_CA_FILE)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        return ctx
+    if os.getenv("COURIER_TLS_INSECURE", "").lower() == "true":
+        log.warning("courier TLS: COURIER_TLS_INSECURE=true, certificate verification DISABLED")
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    log.critical("courier TLS: CA file %s not found. Mount the courier-ca secret "
+                 "(or set COURIER_TLS_INSECURE=true for local experiments only)", COURIER_CA_FILE)
+    raise SystemExit(1)
 
 
 SSL_CTX = build_ssl_context()

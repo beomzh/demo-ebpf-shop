@@ -2,6 +2,7 @@
 # 택배사 도메인은 demo-infra/courier-dns 가 "IP 1개"로 답한다 (dnsPolicy: None).
 #   - ndots:1 + search 없음 → api.courier.example 을 바로 조회해 NXDOMAIN 이 0 으로 유지된다.
 #   - __COURIER_DNS_IP__ 는 scripts/deploy.sh 가 courier-dns 서비스의 ClusterIP 로 채운다.
+# 택배사 TLS 인증서는 courier-ca 시크릿의 사설 CA 로 검증한다 (시크릿이 없으면 기동하지 않음).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -16,6 +17,10 @@ spec:
     metadata:
       labels: { app: delivery-service }
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
       dnsPolicy: None
       dnsConfig:
         nameservers: ["__COURIER_DNS_IP__"]
@@ -34,6 +39,10 @@ spec:
           readinessProbe:
             tcpSocket: { port: 8080 }
             periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
           resources:
             requests: { cpu: 20m, memory: 64Mi }
             limits: { memory: 256Mi }
@@ -45,7 +54,6 @@ spec:
         - name: courier-ca
           secret:
             secretName: courier-ca
-            optional: true
 ---
 apiVersion: v1
 kind: Service

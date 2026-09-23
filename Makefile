@@ -1,4 +1,4 @@
-.PHONY: help certs build push check deploy baseline incident fix reset status firewall traffic cleanup local-up local-fail local-heal local-down
+.PHONY: help certs build push check security deploy baseline incident fix reset status firewall traffic cleanup local-up local-fail local-heal local-down
 
 help:            ## 명령 목록
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-10s %s\n", $$1, $$2}'
@@ -14,6 +14,9 @@ push:            ## 이미지 빌드 + 레지스트리 push
 
 check:           ## 클러스터 사전 점검 (커널, CNI, 택배사 도달)
 	./scripts/check-prereq.sh
+
+security:        ## 배포 후 보안 점검 (SCC, securityContext, 네트워크 정책)
+	./scripts/security-check.sh
 
 deploy:          ## 쿠버네티스에 전체 배포 (정상 상태로 시작)
 	./scripts/deploy.sh

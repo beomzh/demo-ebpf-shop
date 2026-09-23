@@ -1,6 +1,11 @@
 # 회원(Java)·상품(Go)·주문(Java)·결제(Node.js) 서비스.
 # 모니터링 SDK·에이전트·사이드카·어노테이션을 일부러 하나도 두지 않는다.
 # 프로브는 tcpSocket 으로 두어 kubelet 의 HTTP 요청이 지표에 섞이지 않게 한다.
+#
+# 보안: restricted-v2 SCC / Pod Security restricted 를 만족한다.
+#   - runAsUser 는 지정하지 않는다 (OpenShift 가 네임스페이스 범위의 임의 UID 를 부여)
+#   - 루트 파일시스템 읽기 전용. JVM 이 쓰는 /tmp 만 emptyDir 로 연다
+#   - ServiceAccount 토큰 미마운트 (쿠버네티스 API 를 쓰지 않음)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -15,6 +20,10 @@ spec:
     metadata:
       labels: { app: member-service }
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: member-service
           image: __REGISTRY__/shop-member-service:__TAG__
@@ -30,9 +39,18 @@ spec:
           readinessProbe:
             tcpSocket: { port: 8080 }
             periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
           resources:
             requests: { cpu: 50m, memory: 256Mi }
             limits: { memory: 512Mi }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -58,6 +76,10 @@ spec:
     metadata:
       labels: { app: product-service }
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: product-service
           image: __REGISTRY__/shop-product-service:__TAG__
@@ -66,6 +88,10 @@ spec:
           readinessProbe:
             tcpSocket: { port: 8080 }
             periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
           resources:
             requests: { cpu: 20m, memory: 32Mi }
             limits: { memory: 128Mi }
@@ -94,6 +120,10 @@ spec:
     metadata:
       labels: { app: order-service }
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: order-service
           image: __REGISTRY__/shop-order-service:__TAG__
@@ -108,9 +138,18 @@ spec:
           readinessProbe:
             tcpSocket: { port: 8080 }
             periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
           resources:
             requests: { cpu: 50m, memory: 256Mi }
             limits: { memory: 512Mi }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -136,6 +175,10 @@ spec:
     metadata:
       labels: { app: payment-service }
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: payment-service
           image: __REGISTRY__/shop-payment-service:__TAG__
@@ -144,6 +187,10 @@ spec:
           readinessProbe:
             tcpSocket: { port: 8080 }
             periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
           resources:
             requests: { cpu: 20m, memory: 64Mi }
             limits: { memory: 256Mi }

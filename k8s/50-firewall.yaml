@@ -1,10 +1,11 @@
 # "사내 방화벽" — 배송 서비스의 외부 나가는 연결(egress) 허용 목록.
-# NetworkPolicy 를 지원하는 CNI(Calico, Cilium 등)가 필요하다.
+# OpenShift OVN-Kubernetes, Calico, Cilium 등 NetworkPolicy 를 집행하는 CNI 가 필요하다.
 # 허용되지 않은 목적지로의 SYN 은 조용히 버려진다(drop) → 배송 서비스 connect 가 5초 뒤 타임아웃.
 #
 # 규칙 목록 보기:  kubectl -n shop get netpol -l demo.observ/firewall=egress
 #
-# 1) 기본 규칙: 클러스터 내부(모든 네임스페이스의 파드)만 허용 → 외부는 모두 차단
+# 1) 기본 규칙: 배송 서비스는 택배사 DNS 질의만 허용 → 그 밖의 모든 나가는 연결 차단
+#    (Service 53 → 파드 1053 으로 DNAT 되므로 파드 포트 1053 을 허용한다)
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -13,14 +14,20 @@ metadata:
   labels:
     demo.observ/firewall: egress
   annotations:
-    demo.observ/description: "배송 서비스 egress 기본 규칙: 클러스터 내부만 허용"
+    demo.observ/description: "배송 서비스 egress 기본 규칙: DNS 만 허용, 그 외 차단"
 spec:
   podSelector:
     matchLabels: { app: delivery-service }
   policyTypes: [Egress]
   egress:
     - to:
-        - namespaceSelector: {}
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: demo-infra }
+          podSelector:
+            matchLabels: { app: courier-dns }
+      ports:
+        - { protocol: UDP, port: 1053 }
+        - { protocol: TCP, port: 1053 }
 ---
 # 2) 택배사 API 허용 — 등록 당시의 IP(예전 IP) 만 허용되어 있다.
 apiVersion: networking.k8s.io/v1

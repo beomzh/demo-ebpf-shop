@@ -24,6 +24,6 @@ printf "subjectAltName=DNS:%s\nextendedKeyUsage=serverAuth\n" "$DOMAIN" > san.ex
 openssl x509 -req -in courier.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
   -days 825 -out courier.crt -extfile san.ext >/dev/null 2>&1
 rm -f courier.csr san.ext ca.srl
-chmod 644 courier.key
+chmod 600 ca.key courier.key   # 개인키는 소유자만 읽기
 
 echo "[gen-certs] created CA and server cert for ${DOMAIN} in ${DIR}"

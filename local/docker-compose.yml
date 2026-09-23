@@ -6,39 +6,52 @@
 #   curl -s -w ' %{http_code} %{time_total}s\n' localhost:8080/api/orders/1001/delivery   # 장애: 약 5초 뒤 502
 name: shop-local
 
+# 앱 컨테이너는 OpenShift restricted-v2 SCC 와 같은 조건으로 띄운다:
+#   임의 UID + 그룹 0, 읽기 전용 루트 파일시스템, 모든 capability 제거, 권한 상승 금지
 x-common: &common
   restart: unless-stopped
   networks: [shop]
 
+x-ocp-restricted: &ocp-restricted
+  user: "1000680000:0"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs: [/tmp]
+
 services:
   mysql:
     <<: *common
-    image: mysql:8.0
-    environment:
-      MYSQL_ROOT_PASSWORD: demo-root-only
+    image: quay.io/sclorg/mysql-80-c9s:c9s   # 클러스터와 같은 OpenShift 용 이미지 (amd64 전용)
+    platform: linux/amd64
+    user: "1000680000:0"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:   # 로컬 전용 값 (클러스터에서는 deploy.sh 가 무작위로 생성)
+      MYSQL_ROOT_PASSWORD: local-only-root
       MYSQL_DATABASE: shop
       MYSQL_USER: shop
-      MYSQL_PASSWORD: shop-demo
+      MYSQL_PASSWORD: local-only
 
   member-service:
-    <<: *common
+    <<: [*common, *ocp-restricted]
     build: ../services/member-service
     environment:
       DB_URL: jdbc:mysql://mysql:3306/shop?useSSL=false&allowPublicKeyRetrieval=true
       DB_USER: shop
-      DB_PASSWORD: shop-demo
+      DB_PASSWORD: local-only
     depends_on: [mysql]
 
   product-service:
-    <<: *common
+    <<: [*common, *ocp-restricted]
     build: ../services/product-service
 
   payment-service:
-    <<: *common
+    <<: [*common, *ocp-restricted]
     build: ../services/payment-service
 
   delivery-service:
-    <<: *common
+    <<: [*common, *ocp-restricted]
     build: ../services/delivery-service
     environment:
       COURIER_HOST: api.courier.example
@@ -51,7 +64,7 @@ services:
       - ../courier-ext/certs/ca.crt:/etc/courier-ca/ca.crt:ro
 
   order-service:
-    <<: *common
+    <<: [*common, *ocp-restricted]
     build: ../services/order-service
     ports: ["8080:8080"]
     depends_on: [member-service, product-service, payment-service, delivery-service]

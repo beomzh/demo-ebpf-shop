@@ -1,16 +1,8 @@
 # 회원 서비스가 쓰는 MySQL. 데모용이므로 emptyDir (파드 재시작 시 데이터 초기화 → 회원 서비스가 재시드).
-apiVersion: v1
-kind: Secret
-metadata:
-  name: mysql-auth
-  namespace: shop
-type: Opaque
-stringData:
-  MYSQL_ROOT_PASSWORD: demo-root-only    # 데모 전용 값
-  MYSQL_USER: shop
-  MYSQL_PASSWORD: shop-demo              # 데모 전용 값
-  MYSQL_DATABASE: shop
----
+#
+# OpenShift 용 sclorg 이미지를 쓴다. (공식 mysql 이미지는 root 로 시작해 사용자를 바꾸므로
+# restricted-v2 SCC 에서 기동하지 못한다) 임의 UID + 그룹 0 으로 동작하도록 만들어진 이미지다.
+# 접속 정보 시크릿(mysql-auth)은 git 에 두지 않고 scripts/deploy.sh 가 무작위 비밀번호로 만든다.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -25,10 +17,13 @@ spec:
     metadata:
       labels: { app: mysql }
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: mysql
-          image: mysql:8.0
-          args: ["--require-secure-transport=OFF"]
+          image: quay.io/sclorg/mysql-80-c9s:c9s
           envFrom:
             - secretRef: { name: mysql-auth }
           ports:
@@ -37,12 +32,15 @@ spec:
             tcpSocket: { port: 3306 }
             initialDelaySeconds: 10
             periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
           resources:
             requests: { cpu: 100m, memory: 512Mi }
             limits: { memory: 1Gi }
           volumeMounts:
             - name: data
-              mountPath: /var/lib/mysql
+              mountPath: /var/lib/mysql/data
       volumes:
         - name: data
           emptyDir: {}

@@ -54,7 +54,7 @@ make status          # DNS → 새 IP, TCP 연결 실패, 배송 조회 HTTP 502
 ```
 RULE                            DESCRIPTION
 fw-allow-courier-10-0-0-51      택배사 API (api.courier.example) 10.0.0.51:443 허용
-fw-delivery-default             배송 서비스 egress 기본 규칙: 클러스터 내부만 허용
+fw-delivery-default             배송 서비스 egress 기본 규칙: DNS 만 허용, 그 외 차단
 ```
 
 ## 영상 ③ 해결과 표준화 (10분) — 데모 4

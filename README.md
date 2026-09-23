@@ -11,6 +11,7 @@ eBPF 가 가장 잘 보여줄 수 있는 사건입니다. 데모 환경에는 **
 
 - 촬영 순서·화면·멘트: **[docs/runbook.md](docs/runbook.md)**
 - 이 저장소의 어떤 서비스에도 OpenTelemetry SDK, APM 에이전트, 사이드카, 모니터링 어노테이션이 없습니다.
+- **OpenShift(OCP) 기준**으로 작성했습니다. 모든 앱 파드는 `restricted-v2` SCC / Pod Security `restricted` 로 동작합니다. → [보안](#보안-openshift)
 
 ---
 
@@ -23,9 +24,10 @@ eBPF 가 가장 잘 보여줄 수 있는 사건입니다. 데모 환경에는 **
 5. [설치](#설치)
 6. [시나리오 실행](#시나리오-실행)
 7. [데모 환경 조건과 구현](#데모-환경-조건과-구현)
-8. [로컬 스모크 테스트](#로컬-스모크-테스트)
-9. [문제 해결](#문제-해결)
-10. [정리](#정리)
+8. [보안 (OpenShift)](#보안-openshift)
+9. [로컬 스모크 테스트](#로컬-스모크-테스트)
+10. [문제 해결](#문제-해결)
+11. [정리](#정리)
 
 ---
 
@@ -139,13 +141,15 @@ flowchart LR
 │   ├── 20-services.yaml    회원·상품·주문·결제
 │   ├── 30-delivery.yaml    배송 (택배사 전용 DNS 사용)
 │   ├── 40-courier-dns.yaml
-│   ├── 50-firewall.yaml    방화벽(NetworkPolicy)
+│   ├── 50-firewall.yaml    방화벽(NetworkPolicy egress) — 데모 장면용
+│   ├── 55-network-isolation.yaml  서비스 간 ingress 격리 — 보안 기본값
 │   └── 60-loadgen.yaml
 ├── scripts/
 │   ├── check-prereq.sh     커널·CNI·택배사 도달 점검
 │   ├── build-images.sh     이미지 빌드/push
 │   ├── deploy.sh           전체 배포
 │   ├── scenario.sh         baseline | incident | fix | reset | status | firewall | traffic
+│   ├── security-check.sh   배포 후 SCC·securityContext·네트워크 정책 점검
 │   └── cleanup.sh
 ├── local/docker-compose.yml  로컬 스모크 테스트 (eBPF 없이 코드만 확인)
 ├── docs/runbook.md         촬영 런북
@@ -159,12 +163,13 @@ flowchart LR
 
 | 항목 | 조건 |
 | --- | --- |
-| 쿠버네티스 클러스터 | 노드 커널 **4.16 이상** (RHEL 8 이상), 노드 에이전트용 privileged 권한 |
-| CNI | **NetworkPolicy 를 집행하는 CNI** (Calico, Cilium 등). flannel 단독은 방화벽 차단이 동작하지 않음 |
+| 클러스터 | **OpenShift 4.12 이상** 권장 (RHCOS 커널 5.14 → 4.16 조건 충족). 일반 쿠버네티스도 가능 (노드 커널 4.16 이상) |
+| CNI | **NetworkPolicy 를 집행하는 CNI** — OCP 기본 OVN-Kubernetes 로 충분. (일반 쿠버네티스: Calico, Cilium 등. flannel 단독은 차단이 동작하지 않음) |
+| 권한 | 배포하는 계정: 네임스페이스 생성·NetworkPolicy 생성 권한 (cluster-admin 또는 프로젝트 admin). 앱 파드는 특권 불필요 |
 | Observ 노드 에이전트 | eBPF 노드 에이전트만 설치. **ClickHouse 와 노드 에이전트의 traces endpoint 설정 필수** (없으면 T-Map·트랜잭션 조회가 비어 있음) |
 | 외부 택배사 호스트 | 클러스터 **밖** 리눅스 호스트 1대 (VM 가능), Docker, **IP 2개** (예전 IP, 새 IP). 클러스터 노드에서 두 IP 의 443 으로 라우팅 가능해야 함 |
 | 이미지 레지스트리 | 클러스터 노드가 pull 할 수 있는 곳 |
-| 작업 PC | `docker buildx`, `kubectl`, `openssl`, `make` |
+| 작업 PC | `docker buildx`, `kubectl`(또는 `oc` — 스크립트는 `kubectl` 사용, OCP 클라이언트에 포함), `openssl`, `make` |
 
 > OpenTelemetry 에이전트·SDK 는 **설치하지 않습니다.** 섞이면 "eBPF 만으로 보인다"는 메시지가 깨집니다.
 
@@ -181,7 +186,7 @@ vi demo.env    # REGISTRY, COURIER_OLD_IP, COURIER_NEW_IP 등
 
 | 변수 | 설명 | 예 |
 | --- | --- | --- |
-| `REGISTRY` / `TAG` | 이미지 위치 | `harbor.example.com/shop-demo` / `1.0.0` |
+| `REGISTRY` / `TAG` | 이미지 위치 | `harbor.example.com/shop-demo` / `1.0.0` (OCP 내부 레지스트리 사용 시 아래 참고) |
 | `PLATFORM` | 노드 아키텍처 | `linux/amd64` |
 | `COURIER_DOMAIN` | 택배사 도메인 | `api.courier.example` |
 | `COURIER_OLD_IP` | 방화벽에 등록된 예전 IP | `10.0.0.51` |
@@ -212,11 +217,26 @@ curl -sk --resolve api.courier.example:443:10.0.0.52 https://api.courier.example
 make push     # 다섯 서비스 빌드 + push (PLATFORM 기준)
 ```
 
+OCP 내부 이미지 레지스트리를 쓸 때(외부 레지스트리가 없을 때):
+
+```bash
+oc patch configs.imageregistry.operator.openshift.io/cluster --type merge -p '{"spec":{"defaultRoute":true}}'
+HOST=$(oc get route default-route -n openshift-image-registry -o jsonpath='{.spec.host}')
+oc new-project shop 2>/dev/null || true
+docker login -u "$(oc whoami)" -p "$(oc whoami -t)" "$HOST"
+# demo.env:  REGISTRY=$HOST/shop   → make push
+# 매니페스트 이미지는 클러스터 내부 주소로 받아야 하므로 push 후 demo.env 를 다시 바꾼다:
+#            REGISTRY=image-registry.openshift-image-registry.svc:5000/shop
+```
+
+`demo-infra` 네임스페이스는 `shop` 의 이미지를 쓰지 않으므로 추가 권한이 필요 없습니다.
+
 ### 4. 사전 점검 · 배포
 
 ```bash
-make check    # 커널 버전, NetworkPolicy CNI, OTel 흔적, 클러스터→택배사 두 IP 도달, 인증서
-make deploy   # 정상 상태로 배포
+make check    # OCP 감지, 커널 버전, NetworkPolicy CNI, OTel 흔적, 클러스터→택배사 두 IP 도달, 인증서
+make deploy   # 정상 상태로 배포 (MySQL 비밀번호는 이때 무작위 생성)
+make security # 파드별 SCC(restricted-v2)·securityContext·네트워크 정책 점검
 make status
 ```
 
@@ -231,7 +251,7 @@ make status
 [..] 방화벽 규칙
 RULE                          DESCRIPTION
 fw-allow-courier-10-0-0-51    택배사 API (api.courier.example) 10.0.0.51:443 허용
-fw-delivery-default           배송 서비스 egress 기본 규칙: 클러스터 내부만 허용
+fw-delivery-default           배송 서비스 egress 기본 규칙: DNS 만 허용, 그 외 차단
 [..] 주문 서비스를 거친 배송 조회 1건
   HTTP 200  0.02s
 ```
@@ -310,9 +330,71 @@ make reset      # 다음 테이크 준비 (새 IP 규칙 삭제, DNS → 예전 
 
 ---
 
+## 보안 (OpenShift)
+
+OCP 에 그대로 올릴 수 있도록 처리한 항목입니다. 배포 후 `make security` 로 확인합니다.
+
+### 파드 보안
+
+| 항목 | 처리 |
+| --- | --- |
+| SCC | 모든 앱 파드가 **`restricted-v2`** 로 기동. `anyuid`·`privileged` 등 추가 SCC 부여 불필요 |
+| Pod Security Admission | `shop`, `demo-infra` 네임스페이스에 `restricted` enforce·audit·warn 라벨 |
+| 실행 사용자 | 이미지 USER 는 숫자(비 root). 매니페스트에 `runAsUser` 를 **지정하지 않아** OCP 가 네임스페이스 범위의 임의 UID(그룹 0)를 부여 |
+| 컨테이너 설정 | `runAsNonRoot: true`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, `seccompProfile: RuntimeDefault` |
+| 파일시스템 | `readOnlyRootFilesystem: true` (MySQL 제외 — 기동 시 설정 파일 생성). JVM 의 `/tmp` 만 emptyDir |
+| ServiceAccount | `automountServiceAccountToken: false` — 쿠버네티스 API 를 쓰는 앱 없음 |
+| MySQL 이미지 | 공식 `mysql:8.0` 은 root 로 시작해 사용자를 바꾸므로 restricted-v2 에서 기동 불가 → OCP 용 **`quay.io/sclorg/mysql-80-c9s`** 사용 (Red Hat 구독이 있으면 `registry.redhat.io/rhel9/mysql-80` 으로 교체 가능, 환경변수 동일) |
+
+### 비밀 정보
+
+| 항목 | 처리 |
+| --- | --- |
+| MySQL 비밀번호 | git 에 없음. `make deploy` 최초 실행 시 `openssl rand` 로 무작위 생성해 `mysql-auth` 시크릿에 저장 (재배포 시 유지) |
+| 택배사 인증서 | `courier-ext/certs/` 는 `.gitignore`. 개인키 권한 600. 클러스터에는 **공개 CA 인증서(`ca.crt`)만** 시크릿으로 올림 |
+| TLS 검증 | 배송 서비스는 **fail-closed** — CA 가 없으면 기동하지 않음. 검증을 끄려면 `COURIER_TLS_INSECURE=true` 를 명시해야 함(로컬 실험용). TLS 1.2 이상 |
+| `demo.env` | `.gitignore` — 환경별 IP·레지스트리 주소가 저장소에 남지 않음 |
+
+### 네트워크
+
+| 정책 | 방향 | 허용 내용 |
+| --- | --- | --- |
+| `fw-delivery-default` | egress | 배송 서비스 → `courier-dns` (1053/UDP·TCP) **만**. 그 밖의 나가는 연결 전부 차단 |
+| `fw-allow-courier-<예전IP>` | egress | 배송 서비스 → 택배사 예전 IP 443 |
+| `default-deny-ingress` | ingress | `shop`, `demo-infra` 모두 기본 차단 |
+| `allow-order-from-loadgen` | ingress | `demo-infra/loadgen` → 주문 8080 |
+| `allow-backends-from-order` | ingress | 주문 → 회원·상품·결제·배송 8080 |
+| `allow-mysql-from-member` | ingress | 회원 → MySQL 3306 |
+| `allow-courier-dns-from-delivery` | ingress | 배송 → courier-dns 1053 |
+
+- 서비스 간 인바운드 격리 정책(`demo.observ/policy=isolation`)은 데모 장면의 "방화벽" 규칙(`demo.observ/firewall=egress`)과 라벨이 달라 `make firewall` 화면에는 나오지 않습니다.
+- eBPF 노드 에이전트는 커널에서 관찰하므로 네트워크 정책과 무관하게 수집합니다. kubelet 의 tcpSocket 프로브는 노드 트래픽으로 OVN-Kubernetes 가 허용합니다.
+- 외부로 나가는 연결이 있는 파드는 배송 서비스뿐입니다. 다른 앱 파드는 egress 를 제한하지 않았습니다(내부 호출만 함). 필요하면 같은 방식으로 추가하세요.
+
+### 의도적으로 남겨 둔 것 (eBPF 가시성 때문)
+
+| 항목 | 이유 | 운영 환경이라면 |
+| --- | --- | --- |
+| 서비스 간 HTTP 평문 | eBPF 가 L7 프로토콜(HTTP)을 구분하는 장면이 필요 | mTLS (Service Mesh 등) |
+| MySQL `useSSL=false` | MySQL 탭에서 쿼리를 보여주기 위해 | TLS 필수 (`require_secure_transport=ON`) |
+| MySQL `emptyDir` | 데모용 휘발 데이터 | PVC + 백업 |
+
+### Observ 노드 에이전트 (이 저장소 밖)
+
+eBPF 노드 에이전트는 커널 기능을 쓰므로 **privileged SCC** 가 필요합니다. 특권은 에이전트 전용
+서비스어카운트에만 부여하고, 앱 네임스페이스에는 부여하지 않습니다.
+
+```bash
+oc adm policy add-scc-to-user privileged -z <agent-serviceaccount> -n <agent-namespace>
+```
+
+---
+
 ## 로컬 스모크 테스트
 
 eBPF·쿠버네티스 없이 **앱 코드와 호출 흐름만** 확인합니다 (Docker Desktop 가능).
+앱 컨테이너는 **OCP restricted-v2 와 같은 조건**(임의 UID `1000680000:0`, 읽기 전용 루트 파일시스템,
+capability 전부 제거, 권한 상승 금지)으로 띄우므로, 여기서 뜨면 OCP 에서도 권한 문제로 실패하지 않습니다.
 
 ```bash
 make local-up
@@ -343,12 +425,14 @@ WARNING delivery-service courier call failed order=1002 tracking=DX1512686139 st
 | --- | --- |
 | `make incident` 후에도 배송 조회가 200 | CNI 가 NetworkPolicy 를 집행하지 않음 (`make check` 2번). 또는 새 IP 가 이미 허용됨 (`make firewall`) |
 | 장애 시 5초가 아니라 즉시 실패 | 경로 어딘가에서 RST/ICMP 로 거부 중. 택배사 호스트 방화벽이 아닌 **NetworkPolicy 에서 drop** 되는지 확인 |
+| 파드가 `CreateContainerConfigError` / SCC 거부 | `oc get pod <pod> -o yaml \| grep scc`, `oc get events -n shop`. 이미지를 직접 바꿨다면 root 로 도는지 확인 (`make security`) |
+| 배송 서비스가 `CrashLoopBackOff`, 로그에 `CA file ... not found` | `courier-ca` 시크릿 없음 → `make certs` 후 `make deploy` |
+| 주문 → 다른 서비스 호출이 모두 타임아웃 | 인바운드 격리 정책 확인: `oc get netpol -n shop -l demo.observ/policy=isolation`. 라벨(`app=`)을 바꿨다면 정책도 맞춘다 |
 | 정상 상태에서도 연결 실패 | 택배사 호스트 nginx, 예전 IP 라우팅 확인: `make check` 4번 |
 | 실패 목적지가 IP 가 아니라 `도메인:443` 으로 보임 | DNS 가 IP 를 여러 개 돌려주는지 확인: `kubectl -n demo-infra get cm courier-hosts -o yaml` |
 | DNS 탭에 NXDOMAIN 이 보임 | 배송 서비스 파드의 `/etc/resolv.conf` 에 search 가 없는지, `ndots:1` 인지 확인 |
 | T-Map·트랜잭션 조회가 비어 있음 | ClickHouse, 노드 에이전트 traces endpoint 설정 |
 | 언어가 Go 로 안 나옴 | `product-service` 이미지를 직접 빌드했는지(`-s -w` 없이), Go 1.17 이상인지 |
-| 배송 서비스 로그에 `certificate verification DISABLED` | `courier-ext/certs/ca.crt` 없이 배포함. `make certs` → `make deploy` |
 | `make status` 의 배송 서비스 exec 가 연결 실패를 1건 추가 | 정상. 촬영 중에는 `status` 대신 `firewall` 만 사용 권장 |
 
 로그 보기:
