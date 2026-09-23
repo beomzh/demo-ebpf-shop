@@ -263,7 +263,8 @@ sudo ./setup-ips.sh add <NIC> <COURIER_NEW_IP>/<prefix>   # 예) sudo ./setup-ip
 sudo ./run.sh up                                  # nginx 기동 (podman 우선, 없으면 docker)
 ```
 
-③ 방화벽이 켜져 있으면 443 을 엽니다:
+③ 방화벽이 **켜져 있을 때만** 443 을 엽니다 (`systemctl is-active firewalld` 가 `active` 일 때).
+꺼져(`inactive`) 있으면 **켜지 마세요** — 그 호스트에서 돌던 다른 서비스 포트가 막힐 수 있습니다.
 
 ```bash
 sudo firewall-cmd --add-service=https --permanent && sudo firewall-cmd --reload   # RHEL
@@ -285,6 +286,120 @@ curl -sk --resolve api.courier.example:443:<COURIER_NEW_IP> https://api.courier.
 - `ip addr` 로 붙인 보조 IP 는 **재부팅하면 사라집니다**. 촬영 기간 동안 유지하려면 `nmcli` 로 영구 설정하세요:
   `sudo nmcli con mod <연결이름> +ipv4.addresses 10.0.0.52/24 && sudo nmcli con up <연결이름>`
 - 기타: `sudo ./run.sh status | logs | down`
+
+#### 443 을 이미 다른 프로그램이 쓰고 있을 때
+
+택배사 호스트로 bastion 처럼 다른 서비스가 도는 서버를 쓰면, haproxy·nginx·httpd 등이 이미 443 을 쓰고 있을 수 있습니다.
+택배사 nginx 는 **택배사 IP 2개의 443 만** 써야 하고, 기존 프로그램은 **자기 IP 의 443 만** 쓰도록 나눕니다.
+
+**1. 누가 443 을 어떻게 쓰는지 확인**
+
+```bash
+sudo ss -ltnp | grep ':443 '
+```
+
+| 출력 | 의미 | 할 일 |
+| --- | --- | --- |
+| 아무것도 없음 | 443 이 비어 있음 | 위 ②~④ 그대로 진행 |
+| `192.168.xx.50:443 … ("haproxy",…)` 처럼 **특정 IP** | 그 IP 만 쓰는 중 | 기존 프로그램은 그대로. 택배사용 IP 2개를 **새로** 붙이고 아래 3~4 진행 |
+| `0.0.0.0:443` 또는 `*:443` | **모든 IP** 의 443 을 쓰는 중 → 택배사 nginx 가 뜰 수 없음 | 아래 2 로 기존 프로그램의 bind 를 자기 IP 로 좁힌 뒤 3~4 진행 |
+
+**2. 기존 프로그램의 443 을 자기 IP 로 좁히기** (예: bastion 의 haproxy)
+
+예시 환경:
+
+| 항목 | 값 |
+| --- | --- |
+| bastion 기존 IP (`*.apps` 인그레스가 들어오는 IP) | `192.168.xx.50` |
+| 택배사 예전 IP (`COURIER_OLD_IP`) — 새로 붙임 | `192.168.xx.61` |
+| 택배사 새 IP (`COURIER_NEW_IP`) — 새로 붙임 | `192.168.xx.62` |
+| NIC / prefix | `ens192` / `/16` |
+
+`*.apps` 가 어느 IP 로 들어오는지 먼저 확인합니다 (그 IP 가 기존 프로그램이 계속 받아야 하는 IP):
+
+```bash
+getent hosts console-openshift-console.apps.<클러스터 도메인>
+# 192.168.xx.50  console-openshift-console.apps.<클러스터 도메인> ...
+```
+
+haproxy 설정 변경 — **백업 → 수정 → 검증 → 재시작 → 확인** 순서로 합니다:
+
+```bash
+sudo cp -a /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.bak-demo
+sudo grep -nE '^\s*(frontend|bind)' /etc/haproxy/haproxy.cfg      # bind *:443 위치 확인
+sudo sed -i 's|^\(\s*\)bind \*:443\s*$|\1bind 192.168.xx.50:443|' /etc/haproxy/haproxy.cfg
+sudo grep -n -A3 'frontend ingress-https' /etc/haproxy/haproxy.cfg   # bind 192.168.xx.50:443 로 바뀌었는지
+sudo haproxy -c -f /etc/haproxy/haproxy.cfg                          # 'Configuration file is valid' 또는 Warnings 만
+sudo systemctl restart haproxy                                        # 1~2초 API·콘솔 끊김
+sudo ss -ltnp | grep ':443 '                                          # 192.168.xx.50:443 만 보여야 함
+curl -sk -o /dev/null -w '%{http_code}\n' https://console-openshift-console.apps.<클러스터 도메인>/   # 200
+oc get co ingress console                                              # AVAILABLE True
+```
+
+- 80, 6443, 22623 등 **443 외 포트는 건드리지 않습니다.**
+- 문제가 생기면 즉시 되돌립니다:
+  `sudo cp -a /etc/haproxy/haproxy.cfg.bak-demo /etc/haproxy/haproxy.cfg && sudo systemctl restart haproxy`
+
+haproxy 가 아닌 경우도 같은 방식입니다:
+
+| 프로그램 | 설정 파일 (보통) | 바꿀 줄 |
+| --- | --- | --- |
+| haproxy | `/etc/haproxy/haproxy.cfg` | `bind *:443` → `bind 192.168.xx.50:443` |
+| nginx | `/etc/nginx/nginx.conf`, `/etc/nginx/conf.d/*.conf` | `listen 443 ssl;` → `listen 192.168.xx.50:443 ssl;` (모든 server 블록) |
+| Apache httpd | `/etc/httpd/conf.d/ssl.conf` | `Listen 443 https` → `Listen 192.168.xx.50:443 https` |
+| 컨테이너 (`-p 443:443`) | 실행 명령 | `-p 443:443` → `-p 192.168.xx.50:443:443` 로 다시 실행 |
+
+변경 후 각각 설정 검증(`nginx -t`, `apachectl configtest`) → 재시작 → `ss -ltnp | grep ':443 '` 로 확인합니다.
+
+**3. 택배사 IP 2개 붙이기**
+
+같은 대역에서 **아무도 안 쓰는 IP** 2개를 고릅니다 (노드 IP 와 겹치지 않는지 `oc get nodes -o wide`, 응답 없는지 `ping`):
+
+```bash
+ping -c 2 -W 1 192.168.xx.61; ping -c 2 -W 1 192.168.xx.62      # 100% packet loss 여야 함
+sudo ./courier-ext/setup-ips.sh add ens192 192.168.xx.61/16
+sudo ./courier-ext/setup-ips.sh add ens192 192.168.xx.62/16
+ip -4 -brief addr show ens192
+# ens192  UP  192.168.xx.50/16 192.168.xx.61/16 192.168.xx.62/16
+```
+
+`demo.env` 에 두 IP 를 넣습니다:
+
+```bash
+COURIER_OLD_IP=192.168.xx.61
+COURIER_NEW_IP=192.168.xx.62
+```
+
+**4. 택배사 nginx 를 두 IP 에서만 띄우기**
+
+`run.sh` 는 nginx 가 받을 IP 를 이렇게 정합니다:
+
+1. `LISTEN_IPS` 환경변수가 있으면 그 IP 들
+2. 없으면 같은 저장소의 `demo.env` 에 있는 `COURIER_OLD_IP`, `COURIER_NEW_IP` (작업 PC = 택배사 호스트일 때)
+3. 둘 다 없으면 모든 IP (`0.0.0.0:443`)
+
+```bash
+# 저장소 안에서 실행 (demo.env 를 읽음)
+sudo ./courier-ext/run.sh up
+# listen: 192.168.xx.61:443, 192.168.xx.62:443
+# [podman] courier-api started.
+
+# courier-ext 만 복사해 온 다른 서버라면 IP 를 직접 지정
+sudo LISTEN_IPS="192.168.xx.61 192.168.xx.62" ./run.sh up
+```
+
+확인 — 기존 프로그램과 택배사 nginx 가 443 을 나눠 쓰는지:
+
+```bash
+sudo ss -ltnp | grep ':443 '
+# 192.168.xx.50:443   haproxy
+# 192.168.xx.61:443   nginx
+# 192.168.xx.62:443   nginx
+curl -sk --resolve api.courier.example:443:192.168.xx.61 https://api.courier.example/v1/tracking/T1   # served_by 192.168.xx.61
+curl -sk --resolve api.courier.example:443:192.168.xx.62 https://api.courier.example/v1/tracking/T1   # served_by 192.168.xx.62
+```
+
+지정한 IP 가 호스트에 붙어 있지 않으면 `run.sh` 가 `ERROR: … 가 이 호스트에 없습니다` 로 멈춥니다 (3 을 먼저 할 것).
 
 ### 5-6. 내부 레지스트리 route 열기 **[작업 PC]** — 클러스터당 한 번
 
