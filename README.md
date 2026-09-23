@@ -654,6 +654,7 @@ OCP 내부 레지스트리는 **push 하는 주소와 pull 하는 주소가 다�
 | Pod Security Admission | `shop`, `demo-infra` 에 `restricted` enforce·audit·warn 라벨 |
 | 실행 사용자 | 이미지 USER 는 숫자(비 root). 매니페스트에 `runAsUser` 를 **지정하지 않아** OCP 가 임의 UID(그룹 0) 부여 |
 | 컨테이너 설정 | `runAsNonRoot`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, `seccompProfile: RuntimeDefault` |
+| capability 예외 | `courier-dns` 만 `NET_BIND_SERVICE` 추가 — coredns 1.11+ 바이너리에 파일 capability 가 붙어 있어 없으면 `exec /coredns: operation not permitted`. restricted-v2 가 허용하는 유일한 추가 capability |
 | 파일시스템 | `readOnlyRootFilesystem: true` (MySQL 제외 — 기동 시 설정 파일 생성). JVM `/tmp` 만 emptyDir |
 | ServiceAccount | `automountServiceAccountToken: false` |
 | MySQL 이미지 | 공식 `mysql:8.0` 은 restricted-v2 에서 기동 불가 → OCP 용 `quay.io/sclorg/mysql-80-c9s` (Red Hat 구독이 있으면 `registry.redhat.io/rhel9/mysql-80` 으로 교체 가능, 환경변수 동일) |
@@ -723,6 +724,7 @@ oc adm policy add-scc-to-user privileged -z <agent-serviceaccount> -n <agent-nam
 | 파드 `ImagePullBackOff` (shop-* 이미지) | `oc -n shop get istag`, `oc -n shop describe pod <pod>`. push 한 네임스페이스가 `shop` 인지 |
 | 파드 `ImagePullBackOff` (curl·coredns·mysql) | 노드가 docker.io·registry.k8s.io·quay.io 에 접근 불가 → 아래 "폐쇄망" |
 | 파드 `CreateContainerConfigError` / SCC 거부 | `oc get pod <pod> -o yaml \| grep scc`, `oc get events -n shop`. `./demo.sh security` |
+| courier-dns 파드 `exec /coredns: operation not permitted` | `NET_BIND_SERVICE` capability 누락. `k8s/40-courier-dns.yaml` 에 `add: ["NET_BIND_SERVICE"]` 가 있는지 확인 후 `./demo.sh deploy` |
 | 배송 서비스 `CrashLoopBackOff`, 로그 `CA file … not found` | `courier-ca` 시크릿 없음 → `./demo.sh certs` 후 `./demo.sh deploy` |
 | `check` 4) 택배사 응답 없음 | 택배사 호스트 nginx(`sudo ./run.sh status`), 443 방화벽, 노드 → 택배사 IP 라우팅 확인 |
 | 택배사 nginx `Permission denied` (인증서) | SELinux. `run.sh` 로 띄울 것 (`:Z` 라벨) |
