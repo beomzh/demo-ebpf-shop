@@ -223,7 +223,7 @@ OCP 내부 이미지 레지스트리를 쓸 때(외부 레지스트리가 없을
 oc patch configs.imageregistry.operator.openshift.io/cluster --type merge -p '{"spec":{"defaultRoute":true}}'
 HOST=$(oc get route default-route -n openshift-image-registry -o jsonpath='{.spec.host}')
 oc new-project shop 2>/dev/null || true
-docker login -u "$(oc whoami)" -p "$(oc whoami -t)" "$HOST"
+oc whoami -t | docker login -u "$(oc whoami)" --password-stdin "$HOST"   # 토큰을 명령 인자로 넘기지 않음
 # demo.env:  REGISTRY=$HOST/shop   → make push
 # 매니페스트 이미지는 클러스터 내부 주소로 받아야 하므로 push 후 demo.env 를 다시 바꾼다:
 #            REGISTRY=image-registry.openshift-image-registry.svc:5000/shop
