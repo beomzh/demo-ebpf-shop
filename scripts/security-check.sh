@@ -10,14 +10,15 @@ kc api-resources --api-group=security.openshift.io 2>/dev/null | grep -q securit
 for ns in "$APP_NS" "$INFRA_NS"; do
   info "[$ns] 파드별 SCC · UID · 보안 설정"
   printf '  %-34s %-16s %-12s %-6s %-6s %-6s %-6s\n' POD SCC UID ROOTFS PRIVESC CAPS SA_TOKEN
-  while IFS=$'\t' read -r pod scc uid ro esc caps token; do
+  # 구분자는 '|' — 탭은 bash 가 공백으로 취급해 빈 칸(예: MySQL 의 readOnlyRootFilesystem)을 건너뛴다
+  while IFS='|' read -r pod scc uid ro esc caps token; do
     [[ -z "$pod" ]] && continue
     printf '  %-34s %-16s %-12s %-6s %-6s %-6s %-6s\n' "$pod" "${scc:--}" "${uid:--}" "${ro:-false}" "${esc:-?}" "${caps:-?}" "${token:-true}"
     if $is_ocp && [[ "$scc" != restricted* ]]; then warn "  $pod: SCC 가 restricted 계열이 아님 ($scc)"; fail=1; fi
     [[ "$esc" == "false" ]] || { warn "  $pod: allowPrivilegeEscalation 이 false 가 아님"; fail=1; }
     [[ "$caps" == *ALL* ]] || { warn "  $pod: capabilities drop ALL 누락"; fail=1; }
     [[ "$token" == "false" ]] || { warn "  $pod: ServiceAccount 토큰이 마운트됨"; fail=1; }
-  done < <(kc -n "$ns" get pods --field-selector=status.phase=Running -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.openshift\.io/scc}{"\t"}{.spec.containers[0].securityContext.runAsUser}{"\t"}{.spec.containers[0].securityContext.readOnlyRootFilesystem}{"\t"}{.spec.containers[0].securityContext.allowPrivilegeEscalation}{"\t"}{.spec.containers[0].securityContext.capabilities.drop}{"\t"}{.spec.automountServiceAccountToken}{"\n"}{end}')
+  done < <(kc -n "$ns" get pods --field-selector=status.phase=Running -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.metadata.annotations.openshift\.io/scc}{"|"}{.spec.containers[0].securityContext.runAsUser}{"|"}{.spec.containers[0].securityContext.readOnlyRootFilesystem}{"|"}{.spec.containers[0].securityContext.allowPrivilegeEscalation}{"|"}{.spec.containers[0].securityContext.capabilities.drop}{"|"}{.spec.automountServiceAccountToken}{"\n"}{end}')
 done
 
 info "Pod Security 라벨"
