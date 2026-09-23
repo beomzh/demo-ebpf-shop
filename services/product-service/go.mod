@@ -1,3 +1,3 @@
-module github.com/beomzh/ebpf-shop-demo/product-service
+module github.com/beomzh/demo-ebpf-shop/product-service
 
 go 1.22
