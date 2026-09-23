@@ -38,7 +38,7 @@ fi
 info "4) 클러스터 안에서 택배사 IP 로 443 연결 (방화벽 적용 전 경로 확인)"
 for ip in "$COURIER_OLD_IP" "$COURIER_NEW_IP"; do
   if kubectl run "courier-probe-$RANDOM" -n default --rm -i --restart=Never --quiet \
-       --image=curlimages/curl:8.10.1 -- \
+       --image=docker.io/curlimages/curl:8.10.1 -- \
        curl -sk -m 5 -o /dev/null -w '%{http_code}' --resolve "${COURIER_DOMAIN}:443:${ip}" \
        "https://${COURIER_DOMAIN}/health" 2>/dev/null | grep -q 200; then
     ok "  ${ip}:443 응답 OK"

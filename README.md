@@ -134,7 +134,7 @@ flowchart LR
 │   ├── order-service/      Java 21 (java.net.http, HTTP/1.1 고정)
 │   ├── payment-service/    Node.js 20 (node:http, 의존성 없음)
 │   └── delivery-service/   Python 3.12 (표준 라이브러리만, 시스템 libssl)
-├── courier-ext/            외부 택배사 호스트용 nginx + 인증서/보조 IP 스크립트
+├── courier-ext/            외부 택배사 호스트용 nginx (run.sh: podman/docker) + 인증서/보조 IP 스크립트
 ├── k8s/                    쿠버네티스 매니페스트 (__PLACEHOLDER__ 는 scripts 가 채움)
 │   ├── 00-namespaces.yaml
 │   ├── 10-mysql.yaml
@@ -146,7 +146,7 @@ flowchart LR
 │   └── 60-loadgen.yaml
 ├── scripts/
 │   ├── check-prereq.sh     커널·CNI·택배사 도달 점검
-│   ├── build-images.sh     이미지 빌드/push
+│   ├── build-images.sh     이미지 빌드/push (podman / docker 자동 선택)
 │   ├── deploy.sh           전체 배포
 │   ├── scenario.sh         baseline | incident | fix | reset | status | firewall | traffic
 │   ├── security-check.sh   배포 후 SCC·securityContext·네트워크 정책 점검
@@ -167,9 +167,9 @@ flowchart LR
 | CNI | **NetworkPolicy 를 집행하는 CNI** — OCP 기본 OVN-Kubernetes 로 충분. (일반 쿠버네티스: Calico, Cilium 등. flannel 단독은 차단이 동작하지 않음) |
 | 권한 | 배포하는 계정: 네임스페이스 생성·NetworkPolicy 생성 권한 (cluster-admin 또는 프로젝트 admin). 앱 파드는 특권 불필요 |
 | Observ 노드 에이전트 | eBPF 노드 에이전트만 설치. **ClickHouse 와 노드 에이전트의 traces endpoint 설정 필수** (없으면 T-Map·트랜잭션 조회가 비어 있음) |
-| 외부 택배사 호스트 | 클러스터 **밖** 리눅스 호스트 1대 (VM 가능), Docker, **IP 2개** (예전 IP, 새 IP). 클러스터 노드에서 두 IP 의 443 으로 라우팅 가능해야 함 |
+| 외부 택배사 호스트 | 클러스터 **밖** 리눅스 호스트 1대 (VM 가능), **podman 또는 Docker**, **IP 2개** (예전 IP, 새 IP). 클러스터 노드에서 두 IP 의 443 으로 라우팅 가능해야 함 |
 | 이미지 레지스트리 | 클러스터 노드가 pull 할 수 있는 곳 |
-| 작업 PC | `docker buildx`, `kubectl`(또는 `oc` — 스크립트는 `kubectl` 사용, OCP 클라이언트에 포함), `openssl`, `make` |
+| 작업 PC | **`podman` 4.x 이상 또는 `docker buildx`**, `kubectl`(또는 `oc` — 스크립트는 `kubectl` 사용, OCP 클라이언트에 포함), `openssl`, `make` |
 
 > OpenTelemetry 에이전트·SDK 는 **설치하지 않습니다.** 섞이면 "eBPF 만으로 보인다"는 메시지가 깨집니다.
 
@@ -188,6 +188,8 @@ vi demo.env    # REGISTRY, COURIER_OLD_IP, COURIER_NEW_IP 등
 | --- | --- | --- |
 | `REGISTRY` / `TAG` | 이미지 위치 | `harbor.example.com/shop-demo` / `1.0.0` (OCP 내부 레지스트리 사용 시 아래 참고) |
 | `PLATFORM` | 노드 아키텍처 | `linux/amd64` |
+| `CONTAINER_ENGINE` | 빌드 엔진 `auto`·`podman`·`docker` (auto: podman 우선) | `auto` |
+| `REGISTRY_TLS_VERIFY` | podman push 시 레지스트리 인증서 검증 | `true` (OCP 내부 레지스트리 route 가 사설 인증서면 `false`) |
 | `COURIER_DOMAIN` | 택배사 도메인 | `api.courier.example` |
 | `COURIER_OLD_IP` | 방화벽에 등록된 예전 IP | `10.0.0.51` |
 | `COURIER_NEW_IP` | 월요일 밤 바뀐 새 IP | `10.0.0.52` |
@@ -204,18 +206,36 @@ make certs    # courier-ext/certs/{ca.crt, courier.crt, courier.key}
 
 ```bash
 sudo ./setup-ips.sh add eth0 10.0.0.52/24    # 새 IP 를 보조 IP 로 추가 (예전 IP 는 기본 IP 사용)
-docker compose up -d                          # nginx 가 두 IP 모두의 443 에서 응답
+sudo ./run.sh up                              # nginx 가 두 IP 모두의 443 에서 응답 (podman 우선, 없으면 docker)
 curl -sk --resolve api.courier.example:443:10.0.0.51 https://api.courier.example/v1/tracking/T1
 curl -sk --resolve api.courier.example:443:10.0.0.52 https://api.courier.example/v1/tracking/T1
 ```
 
-응답의 `served_by` 에 접속한 IP 가 찍힙니다. 호스트에 이미 방화벽(firewalld/ufw)이 있다면 443 을 열어 둡니다.
+응답의 `served_by` 에 접속한 IP 가 찍힙니다. 호스트에 이미 방화벽(firewalld/ufw)이 있다면 443 을 열어 둡니다
+(RHEL: `sudo firewall-cmd --add-service=https --permanent && sudo firewall-cmd --reload`).
+
+- 443 은 특권 포트라 `sudo` 로 실행합니다 (rootless podman 은 443 바인딩 불가).
+- 볼륨에 SELinux 라벨(`:Z`)을 붙여 RHEL 에서도 인증서·설정 파일을 읽을 수 있습니다.
+- Docker 를 쓰는 호스트는 `docker compose up -d` 도 같은 결과입니다. `run.sh logs`, `run.sh down` 으로 확인·정지합니다.
 
 ### 3. 이미지 빌드
 
 ```bash
+make build    # 로컬 빌드만
 make push     # 다섯 서비스 빌드 + push (PLATFORM 기준)
 ```
+
+빌드 엔진은 `demo.env` 의 `CONTAINER_ENGINE` 으로 고릅니다.
+
+| 엔진 | 실행되는 명령 | 비고 |
+| --- | --- | --- |
+| `podman` | `podman build --platform …` → `podman push --tls-verify=…` | RHEL·OCP 작업 환경 기본. rootless 가능 |
+| `docker` | `docker buildx build --platform … --push`(또는 `--load`) | macOS·Windows Docker Desktop |
+| `auto` | podman 이 있으면 podman, 없으면 docker | 기본값 |
+
+- 빌드 호스트와 `PLATFORM` 의 아키텍처가 다르면(예: Apple Silicon → amd64 클러스터) 에뮬레이션이 필요합니다. podman: `podman machine` 은 기본 지원, RHEL 은 `qemu-user-static` 패키지.
+- Dockerfile 의 베이스 이미지는 모두 **전체 경로**(`docker.io/library/…`)로 적었습니다. RHEL 의 podman·OCP 의 CRI-O 는 짧은 이름(`python:3.12-slim`)을 여러 레지스트리 중 하나로 고르지 못해 실패할 수 있기 때문입니다.
+- 레지스트리 로그인: `podman login <REGISTRY>` 또는 `docker login <REGISTRY>`
 
 OCP 내부 이미지 레지스트리를 쓸 때(외부 레지스트리가 없을 때):
 
@@ -223,8 +243,10 @@ OCP 내부 이미지 레지스트리를 쓸 때(외부 레지스트리가 없을
 oc patch configs.imageregistry.operator.openshift.io/cluster --type merge -p '{"spec":{"defaultRoute":true}}'
 HOST=$(oc get route default-route -n openshift-image-registry -o jsonpath='{.spec.host}')
 oc new-project shop 2>/dev/null || true
-oc whoami -t | docker login -u "$(oc whoami)" --password-stdin "$HOST"   # 토큰을 명령 인자로 넘기지 않음
-# demo.env:  REGISTRY=$HOST/shop   → make push
+# 토큰을 명령 인자로 넘기지 않음. route 인증서가 사설이면 podman 은 --tls-verify=false
+oc whoami -t | podman login -u "$(oc whoami)" --password-stdin --tls-verify=false "$HOST"
+# docker:  oc whoami -t | docker login -u "$(oc whoami)" --password-stdin "$HOST"  (daemon 에 insecure-registries 설정 필요)
+# demo.env:  REGISTRY=$HOST/shop, REGISTRY_TLS_VERIFY=false   → make push
 # 매니페스트 이미지는 클러스터 내부 주소로 받아야 하므로 push 후 demo.env 를 다시 바꾼다:
 #            REGISTRY=image-registry.openshift-image-registry.svc:5000/shop
 ```
@@ -392,9 +414,11 @@ oc adm policy add-scc-to-user privileged -z <agent-serviceaccount> -n <agent-nam
 
 ## 로컬 스모크 테스트
 
-eBPF·쿠버네티스 없이 **앱 코드와 호출 흐름만** 확인합니다 (Docker Desktop 가능).
+eBPF·쿠버네티스 없이 **앱 코드와 호출 흐름만** 확인합니다. podman(`podman compose`)이 있으면 podman, 없으면
+Docker Compose 로 띄웁니다 (`make local-up ENGINE=docker` 처럼 지정 가능).
 앱 컨테이너는 **OCP restricted-v2 와 같은 조건**(임의 UID `1000680000:0`, 읽기 전용 루트 파일시스템,
 capability 전부 제거, 권한 상승 금지)으로 띄우므로, 여기서 뜨면 OCP 에서도 권한 문제로 실패하지 않습니다.
+rootless podman 은 UID 를 65536 개만 매핑하므로 Makefile 이 `LOCAL_UID=10001` 로 낮춰 띄웁니다.
 
 ```bash
 make local-up
@@ -432,6 +456,9 @@ WARNING delivery-service courier call failed order=1002 tracking=DX1512686139 st
 | 실패 목적지가 IP 가 아니라 `도메인:443` 으로 보임 | DNS 가 IP 를 여러 개 돌려주는지 확인: `kubectl -n demo-infra get cm courier-hosts -o yaml` |
 | DNS 탭에 NXDOMAIN 이 보임 | 배송 서비스 파드의 `/etc/resolv.conf` 에 search 가 없는지, `ndots:1` 인지 확인 |
 | T-Map·트랜잭션 조회가 비어 있음 | ClickHouse, 노드 에이전트 traces endpoint 설정 |
+| podman 빌드가 `short-name resolution enforced but cannot prompt without a TTY` | Dockerfile `FROM` 에 짧은 이름을 쓴 경우. `docker.io/library/…` 처럼 전체 경로로 적는다 |
+| podman push 가 `x509: certificate signed by unknown authority` | 사설 인증서 레지스트리. `demo.env` 에 `REGISTRY_TLS_VERIFY=false` |
+| 택배사 호스트 nginx 가 인증서를 못 읽음 (`Permission denied`) | SELinux. `run.sh` 로 띄우면 `:Z` 라벨이 붙는다. `podman run` 을 직접 쓸 때도 `:Z` 를 붙인다 |
 | 언어가 Go 로 안 나옴 | `product-service` 이미지를 직접 빌드했는지(`-s -w` 없이), Go 1.17 이상인지 |
 | `make status` 의 배송 서비스 exec 가 연결 실패를 1건 추가 | 정상. 촬영 중에는 `status` 대신 `firewall` 만 사용 권장 |
 
@@ -450,5 +477,5 @@ kubectl -n demo-infra logs deploy/courier-dns -f     # DNS 질의 로그
 ```bash
 make cleanup                                         # shop, demo-infra 네임스페이스 삭제
 # 택배사 호스트에서
-docker compose down && sudo ./setup-ips.sh del eth0 10.0.0.52/24
+sudo ./run.sh down && sudo ./setup-ips.sh del eth0 10.0.0.52/24
 ```

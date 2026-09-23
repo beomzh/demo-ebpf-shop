@@ -1,3 +1,9 @@
+# 로컬 스모크 테스트 엔진: podman 이 있으면 podman compose, 없으면 docker compose
+# (make local-up ENGINE=docker 처럼 지정 가능)
+ENGINE ?= $(shell command -v podman >/dev/null 2>&1 && echo podman || echo docker)
+COMPOSE   := $(ENGINE) compose
+LOCAL_ENV := $(if $(filter podman,$(ENGINE)),LOCAL_UID=10001,)
+
 .PHONY: help certs build push check security deploy baseline incident fix reset status firewall traffic cleanup local-up local-fail local-heal local-down
 
 help:            ## 명령 목록
@@ -45,15 +51,15 @@ traffic:         ## 부하 발생기 로그 보기
 cleanup:         ## 데모 네임스페이스 삭제
 	./scripts/cleanup.sh
 
-local-up:        ## 로컬 스모크 테스트 기동 (docker compose)
+local-up:        ## 로컬 스모크 테스트 기동 (podman/docker compose)
 	./courier-ext/gen-certs.sh
-	cd local && docker compose up -d --build
+	cd local && $(LOCAL_ENV) $(COMPOSE) up -d --build
 
 local-fail:      ## 로컬: 택배사 연결 실패 재현
-	cd local && COURIER_IP=10.255.255.1 docker compose up -d delivery-service
+	cd local && $(LOCAL_ENV) COURIER_IP=10.255.255.1 $(COMPOSE) up -d delivery-service
 
 local-heal:      ## 로컬: 정상 복구
-	cd local && docker compose up -d delivery-service
+	cd local && $(LOCAL_ENV) $(COMPOSE) up -d delivery-service
 
 local-down:      ## 로컬 스모크 테스트 정리
-	cd local && docker compose down -v
+	cd local && $(LOCAL_ENV) $(COMPOSE) down -v

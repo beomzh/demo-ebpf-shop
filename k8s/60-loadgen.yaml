@@ -64,7 +64,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: loadgen
-          image: curlimages/curl:8.10.1
+          image: docker.io/curlimages/curl:8.10.1
           command: ["/bin/sh", "/scripts/loadgen.sh"]
           env:
             - { name: ORDER_URL, value: "http://order-service.shop.svc.cluster.local:8080" }

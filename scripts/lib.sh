@@ -19,7 +19,22 @@ load_env() {
   set -a; source "$f"; set +a
   : "${REGISTRY:?}" "${TAG:?}" "${COURIER_DOMAIN:?}" "${COURIER_OLD_IP:?}" "${COURIER_NEW_IP:?}"
   : "${PLATFORM:=linux/amd64}" "${LOADGEN_ORDER_INTERVAL:=1}" "${LOADGEN_TRACKING_INTERVAL:=1}"
+  : "${CONTAINER_ENGINE:=auto}" "${REGISTRY_TLS_VERIFY:=true}"
   [[ "$COURIER_OLD_IP" != "$COURIER_NEW_IP" ]] || die "COURIER_OLD_IP 와 COURIER_NEW_IP 가 같습니다."
+}
+
+# 컨테이너 엔진 결정: CONTAINER_ENGINE=docker|podman|auto (auto: podman 우선, 없으면 docker)
+detect_engine() {
+  case "${CONTAINER_ENGINE:-auto}" in
+    docker|podman)
+      command -v "$CONTAINER_ENGINE" >/dev/null || die "CONTAINER_ENGINE=$CONTAINER_ENGINE 인데 명령을 찾을 수 없습니다."
+      echo "$CONTAINER_ENGINE" ;;
+    auto)
+      if command -v podman >/dev/null; then echo podman
+      elif command -v docker >/dev/null; then echo docker
+      else die "podman 또는 docker 가 필요합니다."; fi ;;
+    *) die "CONTAINER_ENGINE 은 docker, podman, auto 중 하나여야 합니다 (현재: $CONTAINER_ENGINE)" ;;
+  esac
 }
 
 dashed() { echo "${1//./-}"; }
