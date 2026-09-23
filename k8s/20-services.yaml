@@ -27,6 +27,7 @@ spec:
       containers:
         - name: member-service
           image: __REGISTRY__/shop-member-service:__TAG__
+          imagePullPolicy: Always
           env:
             - name: DB_URL
               value: jdbc:mysql://mysql:3306/shop?useSSL=false&allowPublicKeyRetrieval=true
@@ -83,6 +84,7 @@ spec:
       containers:
         - name: product-service
           image: __REGISTRY__/shop-product-service:__TAG__
+          imagePullPolicy: Always
           ports:
             - containerPort: 8080
           readinessProbe:
@@ -127,6 +129,7 @@ spec:
       containers:
         - name: order-service
           image: __REGISTRY__/shop-order-service:__TAG__
+          imagePullPolicy: Always
           env:
             - { name: MEMBER_URL, value: "http://member-service:8080" }
             - { name: PRODUCT_URL, value: "http://product-service:8080" }
@@ -182,6 +185,7 @@ spec:
       containers:
         - name: payment-service
           image: __REGISTRY__/shop-payment-service:__TAG__
+          imagePullPolicy: Always
           ports:
             - containerPort: 8080
           readinessProbe:

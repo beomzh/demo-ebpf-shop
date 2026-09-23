@@ -29,6 +29,7 @@ spec:
       containers:
         - name: delivery-service
           image: __REGISTRY__/shop-delivery-service:__TAG__
+          imagePullPolicy: Always
           env:
             - { name: COURIER_HOST, value: "__COURIER_DOMAIN__" }
             - { name: COURIER_PORT, value: "443" }

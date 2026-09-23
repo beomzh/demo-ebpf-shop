@@ -16,16 +16,16 @@ NEW_RULE="fw-allow-courier-$(dashed "$COURIER_NEW_IP")"
 set_courier_ip() {
   local ip="$1"
   info "택배사 DNS: ${COURIER_DOMAIN} → ${ip}"
-  kubectl -n "$INFRA_NS" create configmap courier-hosts \
-    --from-literal="courier.hosts=${ip} ${COURIER_DOMAIN}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  kc -n "$INFRA_NS" create configmap courier-hosts \
+    --from-literal="courier.hosts=${ip} ${COURIER_DOMAIN}" --dry-run=client -o yaml | kc apply -f - >/dev/null
   # ConfigMap 볼륨 전파(최대 ~1분)를 기다리지 않도록 재시작해 즉시 반영
-  kubectl -n "$INFRA_NS" rollout restart deploy/courier-dns >/dev/null
-  kubectl -n "$INFRA_NS" rollout status deploy/courier-dns --timeout=120s >/dev/null
+  kc -n "$INFRA_NS" rollout restart deploy/courier-dns >/dev/null
+  kc -n "$INFRA_NS" rollout status deploy/courier-dns --timeout=120s >/dev/null
 }
 
 allow_new_ip() {
   info "방화벽: ${COURIER_NEW_IP}:443 허용 규칙 추가 (${NEW_RULE})"
-  kubectl apply -f - <<EOF
+  kc apply -f - <<EOF
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -48,21 +48,21 @@ EOF
 }
 
 remove_new_ip() {
-  kubectl -n "$APP_NS" delete netpol "$NEW_RULE" --ignore-not-found >/dev/null
+  kc -n "$APP_NS" delete netpol "$NEW_RULE" --ignore-not-found >/dev/null
   info "방화벽: ${COURIER_NEW_IP} 허용 규칙 제거"
 }
 
 show_firewall() {
-  kubectl -n "$APP_NS" get netpol -l "$FW_LABEL" \
+  kc -n "$APP_NS" get netpol -l "$FW_LABEL" \
     -o custom-columns='RULE:.metadata.name,DESCRIPTION:.metadata.annotations.demo\.observ/description'
 }
 
 status() {
   info "택배사 DNS 설정 (courier-hosts)"
-  kubectl -n "$INFRA_NS" get configmap courier-hosts -o jsonpath='{.data.courier\.hosts}'; echo
+  kc -n "$INFRA_NS" get configmap courier-hosts -o jsonpath='{.data.courier\.hosts}'; echo
 
   info "배송 서비스 파드에서 본 DNS 응답과 443 연결 (3초 제한)"
-  kubectl -n "$APP_NS" exec deploy/delivery-service -- python -c "
+  kc -n "$APP_NS" exec deploy/delivery-service -- python -c "
 import socket
 host='${COURIER_DOMAIN}'
 ip=socket.gethostbyname(host)
@@ -77,7 +77,7 @@ except OSError as e:
   show_firewall
 
   info "주문 서비스를 거친 배송 조회 1건"
-  kubectl -n "$INFRA_NS" exec deploy/loadgen -- \
+  kc -n "$INFRA_NS" exec deploy/loadgen -- \
     curl -s -m 15 -o /dev/null -w '  HTTP %{http_code}  %{time_total}s\n' \
     "http://order-service.${APP_NS}.svc.cluster.local:8080/api/orders/1001/delivery" || true
 }
@@ -99,7 +99,7 @@ case "${1:-}" in
     ;;
   status)   status ;;
   firewall) show_firewall ;;
-  traffic)  kubectl -n "$INFRA_NS" logs -f deploy/loadgen --tail=20 ;;
+  traffic)  kc -n "$INFRA_NS" logs -f deploy/loadgen --tail=20 ;;
   *)
     sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
     exit 1

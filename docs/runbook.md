@@ -11,22 +11,22 @@
 ## 0. 촬영 전날 — 정상 상태 데이터 쌓기
 
 ```bash
-make deploy          # 배포 직후 = 정상 상태
-make status          # DNS → 예전 IP, TCP 연결 성공, 배송 조회 HTTP 200
+./demo.sh deploy          # 배포 직후 = 정상 상태
+./demo.sh status          # DNS → 예전 IP, TCP 연결 성공, 배송 조회 HTTP 200
 ```
 
 - 최소 몇 시간, 가능하면 하루 이상 그대로 둡니다. 데모 3에서 조회 기간을 넓혀 예전 IP 로 정상 연결되던 모습과 비교합니다.
-- `make traffic` 으로 `201`(주문 생성)과 `200`(배송 조회)이 계속 찍히는지 확인합니다.
+- `./demo.sh traffic` 으로 `201`(주문 생성)과 `200`(배송 조회)이 계속 찍히는지 확인합니다.
 
 ## 1. 사건 발생 — 촬영 시작 15~30분 전
 
 ```bash
-make incident        # 택배사가 IP 변경 (DNS → 새 IP). 방화벽은 예전 IP 만 허용된 상태
-make status          # DNS → 새 IP, TCP 연결 실패, 배송 조회 HTTP 502 약 5초
+./demo.sh incident        # 택배사가 IP 변경 (DNS → 새 IP). 방화벽은 예전 IP 만 허용된 상태
+./demo.sh status          # DNS → 새 IP, TCP 연결 실패, 배송 조회 HTTP 502 약 5초
 ```
 
 - SLO 경고와 T-Map 의 5초 영역이 보일 만큼 데이터가 쌓이도록 **촬영 전에 충분히** 둡니다.
-- `make traffic` 에서 배송 조회가 `502 5.0xs` 로 찍히면 정상적으로 장애 상태입니다.
+- `./demo.sh traffic` 에서 배송 조회가 `502 5.0xs` 로 찍히면 정상적으로 장애 상태입니다.
 
 ---
 
@@ -47,9 +47,9 @@ make status          # DNS → 새 IP, TCP 연결 실패, 배송 조회 HTTP 502
 | 2 | 배송 서비스 상세 → 도메인네임(DNS) 탭 | 택배사 도메인(`api.courier.example`) 조회 정상, NXDOMAIN·ServFail 0 | 이름 조회는 멀쩡하다 |
 | 3 | 배송 서비스 상세 → 네트워크 탭 | "Failed TCP connections" 차트, 실패한 연결 목적지가 **새 IP:443** | 연결이 실패하는 곳은 택배사의 새 IP 주소다 |
 | 4 | (조회 기간 확대) | 예전에는 예전 IP 로 정상 연결되던 모습 | 어제까지는 다른 IP 로 잘 붙었다 |
-| 5 | 터미널: `make firewall` | 방화벽 규칙에 예전 IP 만 있고 새 IP 는 없음 | DNS 는 정상인데 새 IP 로의 연결만 실패 → 경로상 차단을 의심 → 방화벽에 새 IP 가 없다 |
+| 5 | 터미널: `./demo.sh firewall` | 방화벽 규칙에 예전 IP 만 있고 새 IP 는 없음 | DNS 는 정상인데 새 IP 로의 연결만 실패 → 경로상 차단을 의심 → 방화벽에 새 IP 가 없다 |
 
-`make firewall` 출력 예:
+`./demo.sh firewall` 출력 예:
 
 ```
 RULE                            DESCRIPTION
@@ -60,9 +60,9 @@ fw-delivery-default             배송 서비스 egress 기본 규칙: DNS 만 �
 ## 영상 ③ 해결과 표준화 (10분) — 데모 4
 
 ```bash
-make fix             # 방화벽에 새 IP:443 허용 추가
-make firewall        # 새 규칙이 추가된 것 확인
-make status          # TCP 연결 성공, 배송 조회 HTTP 200
+./demo.sh fix             # 방화벽에 새 IP:443 허용 추가
+./demo.sh firewall        # 새 규칙이 추가된 것 확인
+./demo.sh status          # TCP 연결 성공, 배송 조회 HTTP 200
 ```
 
 | 순서 | 화면 | 보여줄 것 | 말할 것 |
@@ -72,14 +72,14 @@ make status          # TCP 연결 성공, 배송 조회 HTTP 200
 | 3 | 서비스 목록 (또는 커스텀 대시보드 RED 템플릿) | Java·Go·Python·Node.js 다섯 서비스를 요청 수·지연·오류로 나란히 비교 | 언어·팀·도구가 달라도 같은 기준으로 본다 |
 | 4 | 한계 장표 | 서비스 간 요청 1건 추적, 앱 내부 외부 호출 실패 원인 → OpenTelemetry 와 함께 (EP05) | eBPF 가 못 보는 부분은 다음 편에서 |
 
-- `make fix` 직후 바로 녹화하지 말고 1~2분 기다려 차트에 변화가 반영된 뒤 보여줍니다.
+- `./demo.sh fix` 직후 바로 녹화하지 말고 1~2분 기다려 차트에 변화가 반영된 뒤 보여줍니다.
 
 ## 다음 테이크 준비
 
 ```bash
-make reset           # 방화벽 새 IP 규칙 삭제, DNS → 예전 IP
+./demo.sh reset           # 방화벽 새 IP 규칙 삭제, DNS → 예전 IP
 # 정상 데이터가 몇 분 쌓인 뒤
-make incident
+./demo.sh incident
 ```
 
 ---

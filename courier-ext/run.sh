@@ -17,7 +17,7 @@ elif command -v podman >/dev/null; then ENGINE=podman
 elif command -v docker >/dev/null; then ENGINE=docker
 else echo "podman 또는 docker 가 필요합니다." >&2; exit 1; fi
 
-[[ -f certs/courier.crt && -f certs/courier.key ]] || { echo "certs/ 에 인증서가 없습니다. 작업 PC 에서 'make certs' 후 복사하세요." >&2; exit 1; }
+[[ -f certs/courier.crt && -f certs/courier.key ]] || { echo "certs/ 에 인증서가 없습니다. 작업 PC 에서 './demo.sh certs' 후 복사하세요." >&2; exit 1; }
 
 case "${1:-up}" in
   up)

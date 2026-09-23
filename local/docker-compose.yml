@@ -1,7 +1,7 @@
 # 로컬 스모크 테스트용 (eBPF·쿠버네티스 없이 앱 코드와 호출 흐름만 확인)
-#   make local-up        (docker compose / podman compose 자동 선택)
+#   ./demo.sh local-up        (docker compose / podman compose 자동 선택)
 #   curl -s localhost:8080/api/orders/1001/delivery          # 정상: 200
-#   make local-fail
+#   ./demo.sh local-fail
 #   curl -s -w ' %{http_code} %{time_total}s\n' localhost:8080/api/orders/1001/delivery   # 장애: 약 5초 뒤 502
 name: shop-local
 
@@ -11,7 +11,7 @@ x-common: &common
   restart: unless-stopped
   networks: [shop]
 
-#   rootless podman 은 UID 를 65536 개만 매핑하므로 LOCAL_UID 를 작게 준다 (Makefile 이 자동 설정)
+#   rootless podman 은 UID 를 65536 개만 매핑하므로 LOCAL_UID 를 작게 준다 (./demo.sh 가 자동 설정)
 x-ocp-restricted: &ocp-restricted
   user: "${LOCAL_UID:-1000680000}:0"
   read_only: true
