@@ -53,7 +53,7 @@
 
 ```
 RULE                            DESCRIPTION
-fw-allow-courier-10-0-0-51      택배사 API (api.courier.example) 10.0.0.51:443 허용
+fw-allow-courier-10-0-0-61      택배사 API (api.courier.example) 10.0.0.61:443 허용
 fw-delivery-default             배송 서비스 egress 기본 규칙: DNS 만 허용, 그 외 차단
 ```
 

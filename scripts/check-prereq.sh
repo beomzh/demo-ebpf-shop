@@ -49,7 +49,7 @@ fi
 info "4) 택배사 IP 로 443 연결 (방화벽 적용 전 경로 확인)"
 # demo.env.example 의 예시 IP 를 그대로 쓰고 있으면 먼저 알려준다
 for ip in "$COURIER_OLD_IP" "$COURIER_NEW_IP"; do
-  if [[ "$ip" == 10.0.0.51 || "$ip" == 10.0.0.52 ]]; then
+  if [[ "$ip" == 10.0.0.61 || "$ip" == 10.0.0.62 ]]; then
     warn "  demo.env 의 택배사 IP(${ip})가 예시값입니다. 실제 택배사 호스트 IP 로 바꿨는지 확인하세요."
   fi
 done

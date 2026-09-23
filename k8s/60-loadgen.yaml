@@ -51,7 +51,8 @@ metadata:
   namespace: demo-infra
   labels: { app: loadgen }
 spec:
-  replicas: 1
+  # 파드 1개 = 초당 주문 생성 1건 + 배송 조회 1건 (간격 1초 기준). 늘리려면 demo.env 의 LOADGEN_REPLICAS
+  replicas: __LOADGEN_REPLICAS__
   selector:
     matchLabels: { app: loadgen }
   template:

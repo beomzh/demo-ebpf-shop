@@ -217,8 +217,8 @@ vi demo.env
 **보통은 IP 두 개만 바꾸면 됩니다.**
 
 ```bash
-COURIER_OLD_IP=10.0.0.51     # 택배사 호스트의 기본 IP
-COURIER_NEW_IP=10.0.0.52     # 택배사 호스트에 새로 붙일 보조 IP
+COURIER_OLD_IP=10.0.0.61     # 택배사 호스트의 기본 IP
+COURIER_NEW_IP=10.0.0.62     # 택배사 호스트에 새로 붙일 보조 IP
 ```
 
 나머지 값(기본값 그대로 두면 됨):
@@ -232,7 +232,8 @@ COURIER_NEW_IP=10.0.0.52     # 택배사 호스트에 새로 붙일 보조 IP
 | `CONTAINER_ENGINE` | `auto` | `podman` 우선, 없으면 `docker` |
 | `REGISTRY_TLS_VERIFY` | `false` | default route 인증서 검증. OCP 기본 인그레스 인증서는 보통 사설이라 `false` |
 | `PLATFORM` | `linux/amd64` | 클러스터 노드 아키텍처 |
-| `LOADGEN_*_INTERVAL` | `1` | 부하 발생 간격(초) |
+| `LOADGEN_REPLICAS` | `1` | 부하 발생기 파드 수 (파드 1개 = 초당 주문 1건 + 배송 조회 1건) — [6-1](#6-1-요청량-늘리기) |
+| `LOADGEN_*_INTERVAL` | `1` | 파드 하나의 요청 간격(초) |
 
 ### 5-4. 택배사 인증서 만들기 **[작업 PC]**
 
@@ -259,7 +260,7 @@ scp -r courier-ext <사용자>@<택배사 호스트>:~/
 ```bash
 cd ~/courier-ext
 ip -4 -brief addr                                 # NIC 이름과 기본 IP(= COURIER_OLD_IP) 확인
-sudo ./setup-ips.sh add <NIC> <COURIER_NEW_IP>/<prefix>   # 예) sudo ./setup-ips.sh add eth0 10.0.0.52/24
+sudo ./setup-ips.sh add <NIC> <COURIER_NEW_IP>/<prefix>   # 예) sudo ./setup-ips.sh add eth0 10.0.0.62/24
 sudo ./run.sh up                                  # nginx 기동 (podman 우선, 없으면 docker)
 ```
 
@@ -284,7 +285,7 @@ curl -sk --resolve api.courier.example:443:<COURIER_NEW_IP> https://api.courier.
 - 443 은 특권 포트라 `sudo` 로 실행합니다 (rootless podman 은 443 바인딩 불가).
 - `run.sh` 는 SELinux 라벨(`:Z`)을 붙여 볼륨을 마운트하므로 RHEL 에서도 인증서를 읽을 수 있습니다.
 - `ip addr` 로 붙인 보조 IP 는 **재부팅하면 사라집니다**. 촬영 기간 동안 유지하려면 `nmcli` 로 영구 설정하세요:
-  `sudo nmcli con mod <연결이름> +ipv4.addresses 10.0.0.52/24 && sudo nmcli con up <연결이름>`
+  `sudo nmcli con mod <연결이름> +ipv4.addresses 10.0.0.62/24 && sudo nmcli con up <연결이름>`
 - 기타: `sudo ./run.sh status | logs | down`
 
 #### 443 을 이미 다른 프로그램이 쓰고 있을 때
@@ -301,7 +302,7 @@ sudo ss -ltnp | grep ':443 '
 | 출력 | 의미 | 할 일 |
 | --- | --- | --- |
 | 아무것도 없음 | 443 이 비어 있음 | 위 ②~④ 그대로 진행 |
-| `192.168.xx.50:443 … ("haproxy",…)` 처럼 **특정 IP** | 그 IP 만 쓰는 중 | 기존 프로그램은 그대로. 택배사용 IP 2개를 **새로** 붙이고 아래 3~4 진행 |
+| `10.0.0.50:443 … ("haproxy",…)` 처럼 **특정 IP** | 그 IP 만 쓰는 중 | 기존 프로그램은 그대로. 택배사용 IP 2개를 **새로** 붙이고 아래 3~4 진행 |
 | `0.0.0.0:443` 또는 `*:443` | **모든 IP** 의 443 을 쓰는 중 → 택배사 nginx 가 뜰 수 없음 | 아래 2 로 기존 프로그램의 bind 를 자기 IP 로 좁힌 뒤 3~4 진행 |
 
 **2. 기존 프로그램의 443 을 자기 IP 로 좁히기** (예: bastion 의 haproxy)
@@ -310,16 +311,16 @@ sudo ss -ltnp | grep ':443 '
 
 | 항목 | 값 |
 | --- | --- |
-| bastion 기존 IP (`*.apps` 인그레스가 들어오는 IP) | `192.168.xx.50` |
-| 택배사 예전 IP (`COURIER_OLD_IP`) — 새로 붙임 | `192.168.xx.61` |
-| 택배사 새 IP (`COURIER_NEW_IP`) — 새로 붙임 | `192.168.xx.62` |
-| NIC / prefix | `ens192` / `/16` |
+| bastion 기존 IP (`*.apps` 인그레스가 들어오는 IP) | `10.0.0.50` |
+| 택배사 예전 IP (`COURIER_OLD_IP`) — 새로 붙임 | `10.0.0.61` |
+| 택배사 새 IP (`COURIER_NEW_IP`) — 새로 붙임 | `10.0.0.62` |
+| NIC / prefix | `ens192` / `/24` |
 
 `*.apps` 가 어느 IP 로 들어오는지 먼저 확인합니다 (그 IP 가 기존 프로그램이 계속 받아야 하는 IP):
 
 ```bash
 getent hosts console-openshift-console.apps.<클러스터 도메인>
-# 192.168.xx.50  console-openshift-console.apps.<클러스터 도메인> ...
+# 10.0.0.50  console-openshift-console.apps.<클러스터 도메인> ...
 ```
 
 haproxy 설정 변경 — **백업 → 수정 → 검증 → 재시작 → 확인** 순서로 합니다:
@@ -327,11 +328,11 @@ haproxy 설정 변경 — **백업 → 수정 → 검증 → 재시작 → 확�
 ```bash
 sudo cp -a /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.bak-demo
 sudo grep -nE '^\s*(frontend|bind)' /etc/haproxy/haproxy.cfg      # bind *:443 위치 확인
-sudo sed -i 's|^\(\s*\)bind \*:443\s*$|\1bind 192.168.xx.50:443|' /etc/haproxy/haproxy.cfg
-sudo grep -n -A3 'frontend ingress-https' /etc/haproxy/haproxy.cfg   # bind 192.168.xx.50:443 로 바뀌었는지
+sudo sed -i 's|^\(\s*\)bind \*:443\s*$|\1bind 10.0.0.50:443|' /etc/haproxy/haproxy.cfg
+sudo grep -n -A3 'frontend ingress-https' /etc/haproxy/haproxy.cfg   # bind 10.0.0.50:443 로 바뀌었는지
 sudo haproxy -c -f /etc/haproxy/haproxy.cfg                          # 'Configuration file is valid' 또는 Warnings 만
 sudo systemctl restart haproxy                                        # 1~2초 API·콘솔 끊김
-sudo ss -ltnp | grep ':443 '                                          # 192.168.xx.50:443 만 보여야 함
+sudo ss -ltnp | grep ':443 '                                          # 10.0.0.50:443 만 보여야 함
 curl -sk -o /dev/null -w '%{http_code}\n' https://console-openshift-console.apps.<클러스터 도메인>/   # 200
 oc get co ingress console                                              # AVAILABLE True
 ```
@@ -344,10 +345,10 @@ haproxy 가 아닌 경우도 같은 방식입니다:
 
 | 프로그램 | 설정 파일 (보통) | 바꿀 줄 |
 | --- | --- | --- |
-| haproxy | `/etc/haproxy/haproxy.cfg` | `bind *:443` → `bind 192.168.xx.50:443` |
-| nginx | `/etc/nginx/nginx.conf`, `/etc/nginx/conf.d/*.conf` | `listen 443 ssl;` → `listen 192.168.xx.50:443 ssl;` (모든 server 블록) |
-| Apache httpd | `/etc/httpd/conf.d/ssl.conf` | `Listen 443 https` → `Listen 192.168.xx.50:443 https` |
-| 컨테이너 (`-p 443:443`) | 실행 명령 | `-p 443:443` → `-p 192.168.xx.50:443:443` 로 다시 실행 |
+| haproxy | `/etc/haproxy/haproxy.cfg` | `bind *:443` → `bind 10.0.0.50:443` |
+| nginx | `/etc/nginx/nginx.conf`, `/etc/nginx/conf.d/*.conf` | `listen 443 ssl;` → `listen 10.0.0.50:443 ssl;` (모든 server 블록) |
+| Apache httpd | `/etc/httpd/conf.d/ssl.conf` | `Listen 443 https` → `Listen 10.0.0.50:443 https` |
+| 컨테이너 (`-p 443:443`) | 실행 명령 | `-p 443:443` → `-p 10.0.0.50:443:443` 로 다시 실행 |
 
 변경 후 각각 설정 검증(`nginx -t`, `apachectl configtest`) → 재시작 → `ss -ltnp | grep ':443 '` 로 확인합니다.
 
@@ -356,18 +357,18 @@ haproxy 가 아닌 경우도 같은 방식입니다:
 같은 대역에서 **아무도 안 쓰는 IP** 2개를 고릅니다 (노드 IP 와 겹치지 않는지 `oc get nodes -o wide`, 응답 없는지 `ping`):
 
 ```bash
-ping -c 2 -W 1 192.168.xx.61; ping -c 2 -W 1 192.168.xx.62      # 100% packet loss 여야 함
-sudo ./courier-ext/setup-ips.sh add ens192 192.168.xx.61/16
-sudo ./courier-ext/setup-ips.sh add ens192 192.168.xx.62/16
+ping -c 2 -W 1 10.0.0.61; ping -c 2 -W 1 10.0.0.62      # 100% packet loss 여야 함
+sudo ./courier-ext/setup-ips.sh add ens192 10.0.0.61/24
+sudo ./courier-ext/setup-ips.sh add ens192 10.0.0.62/24
 ip -4 -brief addr show ens192
-# ens192  UP  192.168.xx.50/16 192.168.xx.61/16 192.168.xx.62/16
+# ens192  UP  10.0.0.50/24 10.0.0.61/24 10.0.0.62/24
 ```
 
 `demo.env` 에 두 IP 를 넣습니다:
 
 ```bash
-COURIER_OLD_IP=192.168.xx.61
-COURIER_NEW_IP=192.168.xx.62
+COURIER_OLD_IP=10.0.0.61
+COURIER_NEW_IP=10.0.0.62
 ```
 
 **4. 택배사 nginx 를 두 IP 에서만 띄우기**
@@ -381,22 +382,22 @@ COURIER_NEW_IP=192.168.xx.62
 ```bash
 # 저장소 안에서 실행 (demo.env 를 읽음)
 sudo ./courier-ext/run.sh up
-# listen: 192.168.xx.61:443, 192.168.xx.62:443
+# listen: 10.0.0.61:443, 10.0.0.62:443
 # [podman] courier-api started.
 
 # courier-ext 만 복사해 온 다른 서버라면 IP 를 직접 지정
-sudo LISTEN_IPS="192.168.xx.61 192.168.xx.62" ./run.sh up
+sudo LISTEN_IPS="10.0.0.61 10.0.0.62" ./run.sh up
 ```
 
 확인 — 기존 프로그램과 택배사 nginx 가 443 을 나눠 쓰는지:
 
 ```bash
 sudo ss -ltnp | grep ':443 '
-# 192.168.xx.50:443   haproxy
-# 192.168.xx.61:443   nginx
-# 192.168.xx.62:443   nginx
-curl -sk --resolve api.courier.example:443:192.168.xx.61 https://api.courier.example/v1/tracking/T1   # served_by 192.168.xx.61
-curl -sk --resolve api.courier.example:443:192.168.xx.62 https://api.courier.example/v1/tracking/T1   # served_by 192.168.xx.62
+# 10.0.0.50:443   haproxy
+# 10.0.0.61:443   nginx
+# 10.0.0.62:443   nginx
+curl -sk --resolve api.courier.example:443:10.0.0.61 https://api.courier.example/v1/tracking/T1   # served_by 10.0.0.61
+curl -sk --resolve api.courier.example:443:10.0.0.62 https://api.courier.example/v1/tracking/T1   # served_by 10.0.0.62
 ```
 
 지정한 IP 가 호스트에 붙어 있지 않으면 `run.sh` 가 `ERROR: … 가 이 호스트에 없습니다` 로 멈춥니다 (3 을 먼저 할 것).
@@ -487,13 +488,13 @@ shop-member-service     1.0.0   image-registry.openshift-image-registry.svc:5000
 
 ```
 [..] 택배사 DNS 설정 (courier-hosts)
-10.0.0.51 api.courier.example
+10.0.0.61 api.courier.example
 [..] 배송 서비스 파드에서 본 DNS 응답과 443 연결 (3초 제한)
-  DNS  api.courier.example -> 10.0.0.51
-  TCP  10.0.0.51:443 연결 성공
+  DNS  api.courier.example -> 10.0.0.61
+  TCP  10.0.0.61:443 연결 성공
 [..] 방화벽 규칙
 RULE                          DESCRIPTION
-fw-allow-courier-10-0-0-51    택배사 API (api.courier.example) 10.0.0.51:443 허용
+fw-allow-courier-10-0-0-61    택배사 API (api.courier.example) 10.0.0.61:443 허용
 fw-delivery-default           배송 서비스 egress 기본 규칙: DNS 만 허용, 그 외 차단
 [..] 주문 서비스를 거친 배송 조회 1건
   HTTP 200  0.02s
@@ -531,6 +532,32 @@ fw-delivery-default           배송 서비스 egress 기본 규칙: DNS 만 허
 - Observ 화면은 네임스페이스 필터를 **`shop`** 으로, 트랜잭션 조회 소스 토글은 **eBPF** 로 둡니다.
 - 화면별 진행·멘트·촬영 전 체크리스트·쓰지 않는 표현: **[docs/runbook.md](docs/runbook.md)**
 - 촬영 중에는 `status` 대신 `firewall` 만 쓰는 것을 권장합니다 (`status` 는 배송 서비스 파드에서 연결을 1번 시도하므로 실패 연결이 1건 늘어남).
+
+### 6-1. 요청량 늘리기
+
+부하 발생기(`loadgen`) 파드 하나가 **초당 주문 생성 1건 + 배송 조회 1건**을 보냅니다. 파드 수를 늘리면 그만큼 늘어납니다.
+
+```bash
+# demo.env 에서 파드 수를 정하고 반영 (재배포해도 이 값이 유지됨)
+sed -i 's/^LOADGEN_REPLICAS=.*/LOADGEN_REPLICAS=3/' demo.env
+./demo.sh deploy
+
+# 잠깐 바꿔 볼 때 (다음 deploy 때 demo.env 값으로 돌아감)
+oc scale deploy/loadgen -n demo-infra --replicas=3
+```
+
+| 파드 수 | 주문 생성 | 배송 조회 | 장애 중 주문 서비스가 동시에 붙잡는 요청 |
+| --- | --- | --- | --- |
+| 1 (기본) | 초당 1 | 초당 1 | 약 5 |
+| 3 | 초당 3 | 초당 3 | 약 15 |
+| 5 | 초당 5 | 초당 5 | 약 25 |
+| 10 | 초당 10 | 초당 10 | 약 50 (한계 근처) |
+
+- **배송 조회 합계 초당 10건 이하를 권장합니다.** 장애 중 배송 조회는 주문 서비스의 요청 스레드를 5초씩 붙잡습니다.
+  주문 서비스 스레드 풀이 64개라 이를 넘기면 주문 생성까지 느려져 "배송만 문제"라는 데모 흐름이 흐려집니다.
+- **간격(`LOADGEN_*_INTERVAL`)을 0.5초 미만으로 줄이지 마세요.** 장애 중 파드 하나 안에 대기 중인 curl 이 수십 개 쌓여
+  메모리 제한(128Mi)을 넘을 수 있습니다. 늘릴 때는 파드 수로 늘립니다.
+- 멈추기: `oc scale deploy/loadgen -n demo-infra --replicas=0` / 다시 시작: `--replicas=<원래 값>`
 
 ---
 
