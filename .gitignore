@@ -1,0 +1,9 @@
+demo.env
+courier-ext/certs/
+target/
+node_modules/
+__pycache__/
+*.pyc
+.DS_Store
+.idea/
+.vscode/

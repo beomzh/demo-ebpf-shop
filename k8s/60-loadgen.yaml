@@ -1,0 +1,76 @@
+# 부하 발생기 — "쇼핑몰 프런트"를 흉내 내어 주문 서비스만 호출한다.
+# (배송 서비스를 직접 호출하지 않는다: 모니터링 대상인 주문 서비스를 거쳐야 오류·지연이 집계된다)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loadgen-script
+  namespace: demo-infra
+data:
+  loadgen.sh: |
+    #!/bin/sh
+    # 주문 생성(회원·상품·결제)과 배송 조회를 각각 일정 간격으로 보낸다.
+    # 배송 조회는 장애 시 5초씩 걸리므로 백그라운드로 보내 간격을 유지한다.
+    ORDER_URL="${ORDER_URL:-http://order-service.shop.svc.cluster.local:8080}"
+    ORDER_INTERVAL="${ORDER_INTERVAL:-1}"
+    TRACKING_INTERVAL="${TRACKING_INTERVAL:-1}"
+
+    rnd() { echo $(( $(od -An -N2 -tu2 /dev/urandom | tr -d ' ') % $1 + 1 )); }
+
+    # req <로그용 라벨> <curl 인자...>  →  "시각 상태코드 소요시간 라벨"
+    req() {
+      label="$1"; shift
+      out=$(curl -s -o /dev/null -m 15 -w '%{http_code} %{time_total}s' "$@" 2>/dev/null) || out="000 -"
+      echo "$(date +%H:%M:%S) $out $label"
+    }
+
+    create_orders() {
+      while true; do
+        req "POST /api/orders" -X POST -H 'Content-Type: application/json' \
+          -d "{\"memberId\":$(rnd 100),\"productId\":$(rnd 20)}" "$ORDER_URL/api/orders"
+        sleep "$ORDER_INTERVAL"
+      done
+    }
+
+    track_deliveries() {
+      while true; do
+        id=$((1000 + $(rnd 500)))
+        req "GET /api/orders/$id/delivery" "$ORDER_URL/api/orders/$id/delivery" &
+        sleep "$TRACKING_INTERVAL"
+      done
+    }
+
+    echo "loadgen start target=$ORDER_URL order_interval=${ORDER_INTERVAL}s tracking_interval=${TRACKING_INTERVAL}s"
+    create_orders &
+    track_deliveries &
+    wait
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgen
+  namespace: demo-infra
+  labels: { app: loadgen }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: loadgen }
+  template:
+    metadata:
+      labels: { app: loadgen }
+    spec:
+      containers:
+        - name: loadgen
+          image: curlimages/curl:8.10.1
+          command: ["/bin/sh", "/scripts/loadgen.sh"]
+          env:
+            - { name: ORDER_URL, value: "http://order-service.shop.svc.cluster.local:8080" }
+            - { name: ORDER_INTERVAL, value: "__LOADGEN_ORDER_INTERVAL__" }
+            - { name: TRACKING_INTERVAL, value: "__LOADGEN_TRACKING_INTERVAL__" }
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          volumeMounts:
+            - { name: script, mountPath: /scripts }
+      volumes:
+        - name: script
+          configMap: { name: loadgen-script }

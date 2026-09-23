@@ -1,0 +1,15 @@
+# shop       : 데모 주인공 — 다섯 서비스 + MySQL (Observ 에서는 이 네임스페이스로 필터링)
+# demo-infra : 데모 장치 — 부하 발생기, 택배사 도메인 DNS (화면에 나오지 않게 분리)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: shop
+  labels:
+    demo.observ/role: app
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-infra
+  labels:
+    demo.observ/role: infra

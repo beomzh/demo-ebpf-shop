@@ -1,0 +1,73 @@
+# 로컬 스모크 테스트용 (eBPF·쿠버네티스 없이 앱 코드와 호출 흐름만 확인)
+#   ../courier-ext/gen-certs.sh
+#   docker compose up -d --build
+#   curl -s localhost:8080/api/orders/1001/delivery          # 정상: 200
+#   COURIER_IP=10.255.255.1 docker compose up -d delivery-service
+#   curl -s -w ' %{http_code} %{time_total}s\n' localhost:8080/api/orders/1001/delivery   # 장애: 약 5초 뒤 502
+name: shop-local
+
+x-common: &common
+  restart: unless-stopped
+  networks: [shop]
+
+services:
+  mysql:
+    <<: *common
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: demo-root-only
+      MYSQL_DATABASE: shop
+      MYSQL_USER: shop
+      MYSQL_PASSWORD: shop-demo
+
+  member-service:
+    <<: *common
+    build: ../services/member-service
+    environment:
+      DB_URL: jdbc:mysql://mysql:3306/shop?useSSL=false&allowPublicKeyRetrieval=true
+      DB_USER: shop
+      DB_PASSWORD: shop-demo
+    depends_on: [mysql]
+
+  product-service:
+    <<: *common
+    build: ../services/product-service
+
+  payment-service:
+    <<: *common
+    build: ../services/payment-service
+
+  delivery-service:
+    <<: *common
+    build: ../services/delivery-service
+    environment:
+      COURIER_HOST: api.courier.example
+      COURIER_TIMEOUT_SECONDS: "5"
+      COURIER_CA_FILE: /etc/courier-ca/ca.crt
+    extra_hosts:
+      # 기본은 가상 택배사 컨테이너 IP. 존재하지 않는 IP 로 바꾸면 연결 실패를 재현한다.
+      - "api.courier.example:${COURIER_IP:-172.28.0.100}"
+    volumes:
+      - ../courier-ext/certs/ca.crt:/etc/courier-ca/ca.crt:ro
+
+  order-service:
+    <<: *common
+    build: ../services/order-service
+    ports: ["8080:8080"]
+    depends_on: [member-service, product-service, payment-service, delivery-service]
+
+  courier-api:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes:
+      - ../courier-ext/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ../courier-ext/certs:/etc/nginx/certs:ro
+    networks:
+      shop:
+        ipv4_address: 172.28.0.100
+
+networks:
+  shop:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24

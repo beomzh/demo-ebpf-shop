@@ -1,0 +1,60 @@
+# 회원 서비스가 쓰는 MySQL. 데모용이므로 emptyDir (파드 재시작 시 데이터 초기화 → 회원 서비스가 재시드).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-auth
+  namespace: shop
+type: Opaque
+stringData:
+  MYSQL_ROOT_PASSWORD: demo-root-only    # 데모 전용 값
+  MYSQL_USER: shop
+  MYSQL_PASSWORD: shop-demo              # 데모 전용 값
+  MYSQL_DATABASE: shop
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+  namespace: shop
+  labels: { app: mysql }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: mysql }
+  template:
+    metadata:
+      labels: { app: mysql }
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          args: ["--require-secure-transport=OFF"]
+          envFrom:
+            - secretRef: { name: mysql-auth }
+          ports:
+            - containerPort: 3306
+          readinessProbe:
+            tcpSocket: { port: 3306 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 512Mi }
+            limits: { memory: 1Gi }
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: shop
+spec:
+  selector: { app: mysql }
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: 3306

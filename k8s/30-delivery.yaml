@@ -1,0 +1,58 @@
+# 배송 서비스 (Python) — 모니터링이 전혀 없는 서비스.
+# 택배사 도메인은 demo-infra/courier-dns 가 "IP 1개"로 답한다 (dnsPolicy: None).
+#   - ndots:1 + search 없음 → api.courier.example 을 바로 조회해 NXDOMAIN 이 0 으로 유지된다.
+#   - __COURIER_DNS_IP__ 는 scripts/deploy.sh 가 courier-dns 서비스의 ClusterIP 로 채운다.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: delivery-service
+  namespace: shop
+  labels: { app: delivery-service }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: delivery-service }
+  template:
+    metadata:
+      labels: { app: delivery-service }
+    spec:
+      dnsPolicy: None
+      dnsConfig:
+        nameservers: ["__COURIER_DNS_IP__"]
+        options:
+          - { name: ndots, value: "1" }
+      containers:
+        - name: delivery-service
+          image: __REGISTRY__/shop-delivery-service:__TAG__
+          env:
+            - { name: COURIER_HOST, value: "__COURIER_DOMAIN__" }
+            - { name: COURIER_PORT, value: "443" }
+            - { name: COURIER_TIMEOUT_SECONDS, value: "5" }
+            - { name: COURIER_CA_FILE, value: "/etc/courier-ca/ca.crt" }
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            tcpSocket: { port: 8080 }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 20m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - name: courier-ca
+              mountPath: /etc/courier-ca
+              readOnly: true
+      volumes:
+        - name: courier-ca
+          secret:
+            secretName: courier-ca
+            optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: delivery-service
+  namespace: shop
+spec:
+  selector: { app: delivery-service }
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }

@@ -1,0 +1,11 @@
+# 클러스터 밖 "외부 택배사" 호스트에서 실행한다.
+# host 네트워크로 떠서 호스트에 붙은 예전 IP·새 IP 양쪽에서 443 을 받는다.
+services:
+  courier-api:
+    image: nginx:1.27-alpine
+    container_name: courier-api
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/nginx/certs:ro

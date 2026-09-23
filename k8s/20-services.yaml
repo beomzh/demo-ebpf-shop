@@ -1,0 +1,159 @@
+# 회원(Java)·상품(Go)·주문(Java)·결제(Node.js) 서비스.
+# 모니터링 SDK·에이전트·사이드카·어노테이션을 일부러 하나도 두지 않는다.
+# 프로브는 tcpSocket 으로 두어 kubelet 의 HTTP 요청이 지표에 섞이지 않게 한다.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: member-service
+  namespace: shop
+  labels: { app: member-service }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: member-service }
+  template:
+    metadata:
+      labels: { app: member-service }
+    spec:
+      containers:
+        - name: member-service
+          image: __REGISTRY__/shop-member-service:__TAG__
+          env:
+            - name: DB_URL
+              value: jdbc:mysql://mysql:3306/shop?useSSL=false&allowPublicKeyRetrieval=true
+            - name: DB_USER
+              valueFrom: { secretKeyRef: { name: mysql-auth, key: MYSQL_USER } }
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: mysql-auth, key: MYSQL_PASSWORD } }
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            tcpSocket: { port: 8080 }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 256Mi }
+            limits: { memory: 512Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: member-service
+  namespace: shop
+spec:
+  selector: { app: member-service }
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: product-service
+  namespace: shop
+  labels: { app: product-service }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: product-service }
+  template:
+    metadata:
+      labels: { app: product-service }
+    spec:
+      containers:
+        - name: product-service
+          image: __REGISTRY__/shop-product-service:__TAG__
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            tcpSocket: { port: 8080 }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits: { memory: 128Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: product-service
+  namespace: shop
+spec:
+  selector: { app: product-service }
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+  namespace: shop
+  labels: { app: order-service }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: order-service }
+  template:
+    metadata:
+      labels: { app: order-service }
+    spec:
+      containers:
+        - name: order-service
+          image: __REGISTRY__/shop-order-service:__TAG__
+          env:
+            - { name: MEMBER_URL, value: "http://member-service:8080" }
+            - { name: PRODUCT_URL, value: "http://product-service:8080" }
+            - { name: PAYMENT_URL, value: "http://payment-service:8080" }
+            - { name: DELIVERY_URL, value: "http://delivery-service:8080" }
+            - { name: DELIVERY_TIMEOUT_SECONDS, value: "10" }
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            tcpSocket: { port: 8080 }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 256Mi }
+            limits: { memory: 512Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-service
+  namespace: shop
+spec:
+  selector: { app: order-service }
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+  namespace: shop
+  labels: { app: payment-service }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: payment-service }
+  template:
+    metadata:
+      labels: { app: payment-service }
+    spec:
+      containers:
+        - name: payment-service
+          image: __REGISTRY__/shop-payment-service:__TAG__
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            tcpSocket: { port: 8080 }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 20m, memory: 64Mi }
+            limits: { memory: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service
+  namespace: shop
+spec:
+  selector: { app: payment-service }
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }

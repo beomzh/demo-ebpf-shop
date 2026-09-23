@@ -1,0 +1,13 @@
+{
+  "name": "payment-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "쇼핑몰 데모 - 결제 서비스 (Node.js, 외부 의존성 없음)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
