@@ -555,6 +555,36 @@ curl -sk --resolve api.pg.example:443:10.0.0.61 https://api.pg.example/health   
 - 두 IP 는 재부팅하면 사라지므로 촬영 기간 동안은 `nmcli` 로 영구 설정하세요 (5-5 참고). 재부팅 후 `sudo ./demo.sh corpdns up` 다시 실행.
 - 존 파일·Corefile 은 `corpdns-ext/.rendered/` 에 만들어집니다 (git 에 올라가지 않음). 질의 로그: `sudo ./demo.sh corpdns logs primary`
 
+#### 53 을 bastion 의 named(BIND) 가 쓰는 경우
+
+bastion 이 클러스터용 DNS 로 `named` 를 돌리고 있으면, 기본 설정(`listen-on port 53 { any; };`)에서는
+**호스트에 IP 를 새로 붙이는 순간 `named` 가 그 IP 의 53 까지 자동으로 잡습니다.** 이 상태에서 `./demo.sh corpdns up` 은 이렇게 멈춥니다:
+
+```
+ERROR: 10.0.0.63:53 을 이미 다른 프로세스가 쓰고 있습니다: users:(("named",pid=8318,fd=176))
+       bastion 의 named(BIND) 는 listen-on 이 any 면 새로 붙인 IP 의 53 도 자동으로 잡습니다.
+```
+
+`named` 가 **원래 응답하던 IP 만** 듣도록 좁히면 됩니다 (데모용 IP 는 빼고).
+
+```bash
+sudo ss -lunp | grep ':53 ' | awk '{print $4}' | sort -u     # named 가 지금 잡은 IP 목록
+sudo grep -n "listen-on" /etc/named.conf                       # 예: listen-on port 53 { any; };
+sudo cp -a /etc/named.conf /etc/named.conf.bak-demo
+sudo vi /etc/named.conf
+#   listen-on port 53 { any; };
+#     →  listen-on port 53 { 127.0.0.1; 10.0.0.50; 172.17.0.1; 172.18.0.1; };
+#        (위 목록에서 데모용 IP — 택배사 .61/.62, 사내 DNS .63/.64 — 만 뺀 나머지)
+sudo named-checkconf && sudo rndc reconfig                      # 설정 다시 읽기 (named 재시작 없이)
+sudo ss -lunp | grep ':53 '                                     # 데모용 IP 가 목록에서 빠졌는지
+dig +short @10.0.0.50 <평소 조회하던 이름>                        # 기존 DNS 정상인지
+sudo ./demo.sh corpdns up
+```
+
+- `rndc reconfig` 후에도 데모용 IP 가 남아 있으면 `sudo systemctl restart named` (1~2초 DNS 중단 — 클러스터가 이 DNS 를 쓰면 짧게 영향).
+- 되돌리기: `sudo cp -a /etc/named.conf.bak-demo /etc/named.conf && sudo rndc reconfig`
+- dnsmasq 라면 `/etc/dnsmasq.conf` 에 `bind-interfaces` + `listen-address=<원래 IP>` 로 같은 효과를 냅니다.
+
 #### corporate 모드 (`CORP_DNS_MODE=corporate`) **[사내 DNS 담당자에게 요청]**
 
 1. `demo.env`: `CORP_DNS_MODE=corporate`, `CORP_DNS_PRIMARY`·`CORP_DNS_SECONDARY` 에 실제 사내 DNS IP
@@ -1024,6 +1054,8 @@ oc adm policy add-scc-to-user privileged -z <agent-serviceaccount> -n <agent-nam
 | 배포 후 체크아웃이 전부 502, 경로 끝이 `pg(api.pg.example) [queryA ENOTFOUND …]` | 사내 DNS 에 PG 도메인이 없음 — `pg-missing` 을 켜 둔 상태인지(`./demo.sh pg-reset`), bastion 사내 DNS 를 띄웠는지(`sudo ./demo.sh corpdns status`) |
 | 체크아웃이 항상 4초 이상, `dns fallback` WARN 반복 | 주 DNS 가 응답하지 않음 — `pg-primary-down` 상태인지(`./demo.sh pg-reset`), 노드 → 주 DNS 53/udp 가 막혀 있지 않은지 |
 | 경로 끝이 `pg(…) [… SSLHandshakeException …]` / `unable to verify the first certificate` | PG 인증서를 데모 CA 로 검증하지 못함 — `./demo.sh certs` 후 `sudo ./courier-ext/run.sh up`, `courier-ca` 시크릿이 같은 CA 인지 (`./demo.sh deploy`) |
+| `check` 의 점검 파드가 `violates PodSecurity "restricted:latest"` | 이전 버전 스크립트. `git pull` (점검 파드에 restricted 보안 설정이 들어간 버전) |
+| `corpdns up` 이 `…:53 을 이미 다른 프로세스가 쓰고 있습니다: …named…` | bastion named 가 데모용 IP 의 53 을 잡음 → [5-5b 'named 가 쓰는 경우'](#53-을-bastion-의-namedbind-가-쓰는-경우) |
 | `./demo.sh corpdns up` 이 `다른 프로그램이 모든 IP 의 53/udp 를 쓰고 있습니다` | bastion 의 dnsmasq·named 등이 `0.0.0.0:53` 사용 중 — 그 프로그램을 자기 IP 로 좁히거나(5-5 의 443 방법과 같음) 별도 VM 사용 |
 | 어디서 실패하는지 모르겠음 | `./demo.sh status` 의 `실패 경로`, 또는 `oc -n demo-shop logs deploy/gateway-service \| grep "upstream call failed"` 의 `path=` 를 보면 끝까지 보입니다 ([2. 구성](#애플리케이션-로그로-실패-지점-찾기)) |
 | `incident` 후에도 배송 조회가 200 | 새 IP 가 이미 허용됨 (`./demo.sh firewall` 에 새 IP 규칙이 있으면 `./demo.sh reset` 후 다시) |
@@ -1155,6 +1187,10 @@ REGISTRY_TLS_VERIFY=true
 
 ### 일반 쿠버네티스
 
-`CLI=kubectl`, `REGISTRY_MODE=external` 로 두면 됩니다. NetworkPolicy 를 집행하는 CNI(Calico, Cilium 등)가 필요하고,
-`curlimages/curl` 처럼 USER 가 이름인 이미지는 `runAsNonRoot` 검사에서 막힐 수 있어 `runAsUser` 지정이 필요할 수 있습니다.
+`CLI=kubectl`, `REGISTRY_MODE=external` 로 두면 됩니다 (`oc` 가 없으면 `CLI=auto` 도 kubectl 을 고릅니다).
+NetworkPolicy 를 집행하는 CNI(Calico, Canal, Cilium, OVN-Kubernetes 등)가 필요합니다.
+
+- OpenShift 가 아니면(SCC API 없음) 스크립트가 자동으로: loadgen·courier-dns(이미지 USER 가 이름)와 `check` 의 점검 파드에
+  `runAsUser: 65532` 를 넣습니다. 나머지 이미지는 USER 가 숫자라 그대로 됩니다.
+- Pod Security `restricted` 가 클러스터 전체에 강제돼 있어도 모든 파드가 뜹니다 (k3s + restricted 로 확인).
 빌드는 `CONTAINER_ENGINE=docker` 로 `docker buildx` 를 쓸 수 있습니다.

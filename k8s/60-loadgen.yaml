@@ -83,6 +83,7 @@ spec:
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
+        __NONOCP_RUN_AS_USER__
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: loadgen

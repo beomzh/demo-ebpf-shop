@@ -39,9 +39,16 @@ render_conf() {
     echo "listen: 0.0.0.0:443 (모든 IP)"
     return
   fi
+  local holder
   for ip in $ips; do
     ip -4 -o addr show 2>/dev/null | grep -q " ${ip}/" \
       || { echo "ERROR: ${ip} 가 이 호스트에 없습니다. 먼저 'sudo ./setup-ips.sh add <NIC> ${ip}/<prefix>'" >&2; exit 1; }
+    holder="$(ss -Hlntp 2>/dev/null | awk -v a="${ip}:443" -v w="0.0.0.0:443" '{for (i = 1; i <= NF; i++) if ($i == a || $i == w || $i == "*:443") { print $NF; exit }}')"
+    if [[ -n "$holder" ]]; then
+      echo "ERROR: ${ip}:443 (또는 모든 IP 의 443) 을 이미 다른 프로세스가 쓰고 있습니다: ${holder}" >&2
+      echo "       README 5-5 '443 을 이미 다른 프로그램이 쓰고 있을 때' 참고." >&2
+      exit 1
+    fi
   done
   # nginx.conf 의 'listen 443 ssl;' 한 줄을 IP 별 listen 줄로 바꾼다
   awk -v ips="$ips" '
@@ -59,8 +66,9 @@ case "${1:-up}" in
   up)
     [[ -f certs/courier.crt && -f certs/courier.key ]] \
       || { echo "certs/ 에 인증서가 없습니다. 작업 PC 에서 './demo.sh certs' 후 복사하세요." >&2; exit 1; }
+    "$ENGINE" rm -f "$NAME" >/dev/null 2>&1 || true   # 이전 것부터 지워야 포트 점검이 정확하다
+    sleep 1
     render_conf "$(listen_ips)"
-    "$ENGINE" rm -f "$NAME" >/dev/null 2>&1 || true
     "$ENGINE" run -d --name "$NAME" --network host --restart unless-stopped \
       -v "$PWD/$RENDERED:/etc/nginx/nginx.conf:ro,Z" \
       -v "$PWD/certs:/etc/nginx/certs:ro,Z" \

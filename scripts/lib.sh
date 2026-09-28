@@ -62,6 +62,31 @@ detect_cli() {
 # 모든 스크립트는 kubectl/oc 대신 kc 를 쓴다
 kc() { "$KC" "$@"; }
 
+# OpenShift 여부 (SCC API 가 있으면 OpenShift). 한 번만 확인한다
+is_ocp() {
+  if [[ -z "${_IS_OCP:-}" ]]; then
+    if kc api-resources --api-group=security.openshift.io 2>/dev/null | grep -q securitycontextconstraints; then
+      _IS_OCP=yes
+    else
+      _IS_OCP=no
+    fi
+  fi
+  [[ "$_IS_OCP" == yes ]]
+}
+
+# 점검용 임시 파드 실행: probe <이름> <이미지> <명령...>
+# Pod Security "restricted" 를 강제하는 클러스터에서도 뜨도록 보안 설정을 붙인다.
+# OpenShift 는 UID 를 자동 부여하므로 지정하지 않고, 그 밖의 쿠버네티스는 비 root UID(65532)를 지정한다.
+probe() {
+  local pod="$1-$RANDOM" image="$2"; shift 2
+  local uid=''
+  is_ocp || uid='"runAsUser":65532,'
+  kc run "$pod" -n default --rm -i --restart=Never --quiet --pod-running-timeout=90s --image="$image" \
+    --override-type=strategic \
+    --overrides="{\"spec\":{\"securityContext\":{${uid}\"runAsNonRoot\":true,\"seccompProfile\":{\"type\":\"RuntimeDefault\"}},\"containers\":[{\"name\":\"${pod}\",\"securityContext\":{\"allowPrivilegeEscalation\":false,\"capabilities\":{\"drop\":[\"ALL\"]}}}]}}" \
+    -- "$@"
+}
+
 # ── 컨테이너 엔진 ────────────────────────────────────────────
 # CONTAINER_ENGINE=podman|docker|auto (auto: podman 우선, 없으면 docker)
 detect_engine() {
@@ -105,9 +130,13 @@ image_name() { echo "shop-$1"; }   # 서비스명 → 이미지(ImageStream) 이
 dashed() { echo "${1//./-}"; }
 
 # render <manifest> [COURIER_DNS_IP] → stdout
+# __NONOCP_RUN_AS_USER__ : 이미지의 USER 가 숫자가 아닌 파드(loadgen, courier-dns)용.
+#   OpenShift 는 UID 를 자동 부여하므로 줄을 지우고, 그 밖의 쿠버네티스는 runAsUser 를 넣는다
 render() {
-  local reg; reg="$(pull_registry)"
+  local reg uid_rule; reg="$(pull_registry)"
+  if is_ocp; then uid_rule='/__NONOCP_RUN_AS_USER__/d'; else uid_rule='s#__NONOCP_RUN_AS_USER__#runAsUser: 65532#'; fi
   sed \
+    -e "$uid_rule" \
     -e "s#__REGISTRY__#${reg}#g" \
     -e "s#__TAG__#${TAG}#g" \
     -e "s#__COURIER_DOMAIN__#${COURIER_DOMAIN}#g" \

@@ -32,7 +32,7 @@ done < <(kc get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.statu
 
 info "2) NetworkPolicy 를 집행하는 CNI (방화벽 역할)"
 cni=$(kc get pods -A -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
-      | grep -Eo '^(ovnkube-node|calico-node|cilium|antrea-agent|kube-router|weave-net)' | sort -u | tr '\n' ' ' || true)
+      | grep -Eo '(ovnkube-node|calico-node|canal|cilium|antrea-agent|kube-router|weave-net|kube-ovn-cni)' | sort -u | tr '\n' ' ' || true)
 if [[ -n "$cni" ]]; then
   ok "  감지: $cni"
 else
@@ -57,11 +57,13 @@ done
 # 실패 메시지를 보고 원인을 추정한다
 probe_hint() {
   case "$1" in
+    *"violates PodSecurity"*)
+      echo "점검 파드가 Pod Security 정책에 막힘 → 스크립트를 최신으로 (git pull)" ;;
     *"timed out waiting"*|*ImagePull*|*ErrImage*|*"pod default/"*)
       echo "테스트 파드가 뜨지 못함 → 노드가 docker.io 이미지를 받을 수 있는지 확인 (README 12. 폐쇄망)" ;;
     *"Connection timed out"*|*"Operation timed out"*|*"timed out after"*)
       echo "응답 없음(타임아웃) → IP 오타, 택배사 호스트에 IP 가 붙어 있는지, 경로상 방화벽·라우팅 확인" ;;
-    *"Connection refused"*)
+    *"Connection refused"*|*"연결이 거부됨"*)
       echo "연결 거부 → IP 는 살아 있지만 443 에서 nginx 가 안 떠 있음 (택배사 호스트: sudo ./run.sh status)" ;;
     *"No route to host"*|*"Network is unreachable"*|*"Host is unreachable"*)
       echo "경로 없음 → 노드에서 해당 IP 대역으로 라우팅이 되는지 확인" ;;
@@ -74,7 +76,7 @@ probe_hint() {
 # 4-a) 작업 PC(클러스터 밖)에서
 if command -v curl >/dev/null; then
   for ip in "$COURIER_OLD_IP" "$COURIER_NEW_IP"; do
-    out="$(curl -sSk -m 5 -o /dev/null -w 'HTTP %{http_code}' --resolve "${COURIER_DOMAIN}:443:${ip}" \
+    out="$(LC_ALL=C curl -sSk -m 5 -o /dev/null -w 'HTTP %{http_code}' --resolve "${COURIER_DOMAIN}:443:${ip}" \
            "https://${COURIER_DOMAIN}/health" 2>&1 || true)"
     out="$(printf '%s' "$out" | tr '\n' ' ' | sed 's/  */ /g; s/ $//')"
     if [[ "$out" == *"HTTP 200"* ]]; then
@@ -88,8 +90,7 @@ fi
 
 # 4-b) 클러스터 안(임시 파드)에서 — 이 결과가 통과해야 한다
 for ip in "$COURIER_OLD_IP" "$COURIER_NEW_IP"; do
-  out="$(kc run "courier-probe-$RANDOM" -n default --rm -i --restart=Never --quiet \
-         --pod-running-timeout=90s --image=docker.io/curlimages/curl:8.10.1 -- \
+  out="$(probe courier-probe docker.io/curlimages/curl:8.10.1 \
          sh -c "curl -sSk -m 5 -o /dev/null -w 'HTTP %{http_code}' --resolve '${COURIER_DOMAIN}:443:${ip}' 'https://${COURIER_DOMAIN}/health' 2>&1" \
          2>&1 || true)"
   out="$(printf '%s' "$out" | grep -v '^pod .* deleted' | tr '\n' ' ' | sed 's/  */ /g; s/ $//')"
@@ -104,8 +105,7 @@ done
 
 info "5) 사내 DNS (${CORP_DNS_MODE} 모드) 와 외부 PG — 클러스터 안(임시 파드)에서"
 for dns_ip in "$CORP_DNS_PRIMARY" "$CORP_DNS_SECONDARY"; do
-  out="$(kc run "corpdns-probe-$RANDOM" -n default --rm -i --restart=Never --quiet \
-         --pod-running-timeout=90s --image=docker.io/library/busybox:1.36 -- \
+  out="$(probe corpdns-probe docker.io/library/busybox:1.36 \
          nslookup -type=a -timeout=2 "$PG_DOMAIN" "$dns_ip" 2>&1 || true)"
   if printf '%s' "$out" | grep -q "Address: ${PG_IP}\b"; then
     ok "  [클러스터 → 사내 DNS ${dns_ip}] ${PG_DOMAIN} → ${PG_IP} OK"
@@ -119,8 +119,7 @@ for dns_ip in "$CORP_DNS_PRIMARY" "$CORP_DNS_SECONDARY"; do
     fail=1
   fi
 done
-out="$(kc run "pg-probe-$RANDOM" -n default --rm -i --restart=Never --quiet \
-       --pod-running-timeout=90s --image=docker.io/curlimages/curl:8.10.1 -- \
+out="$(probe pg-probe docker.io/curlimages/curl:8.10.1 \
        sh -c "curl -sSk -m 5 -o /dev/null -w 'HTTP %{http_code}' --resolve '${PG_DOMAIN}:443:${PG_IP}' 'https://${PG_DOMAIN}/health' 2>&1" \
        2>&1 || true)"
 if [[ "$out" == *"HTTP 200"* ]]; then

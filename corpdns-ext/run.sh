@@ -82,15 +82,34 @@ start_one() {
     "$IMAGE" -conf "/etc/coredns/Corefile.$role" >/dev/null
 }
 
+# port_holder <IP> <포트> : 그 IP:포트를 듣고 있는 프로세스 (없으면 빈 문자열)
+port_holder() {
+  ss -Hlnup 2>/dev/null | awk -v a="$1:$2" '{for (i = 1; i <= NF; i++) if ($i == a) { print $NF; exit }}'
+}
+
 has_record() { grep -q "^${PG_DOMAIN}\." "$RENDER/db.corp" 2>/dev/null; }
 
 case "${1:-status}" in
   up)
     require_ip "$CORP_DNS_PRIMARY"; require_ip "$CORP_DNS_SECONDARY"
-    if ss -lnu 2>/dev/null | awk '{print $4}' | grep -qE '^(0\.0\.0\.0|\*|\[::\]):53$'; then
-      echo "ERROR: 다른 프로그램이 모든 IP 의 53/udp 를 쓰고 있습니다 (sudo ss -lunp | grep ':53 '). README '53 을 이미 다른 프로그램이 쓰고 있을 때' 참고." >&2
+    "$ENGINE" rm -f corp-dns-primary corp-dns-secondary >/dev/null 2>&1 || true
+    sleep 1
+    if ss -Hlnu 2>/dev/null | awk '{print $4}' | grep -qE '^(0\.0\.0\.0|\*|\[::\]):53$'; then
+      echo "ERROR: 다른 프로그램이 모든 IP 의 53/udp 를 쓰고 있습니다 (sudo ss -lunp | grep ':53 ')." >&2
+      echo "       README 5-5b '53 을 이미 다른 프로그램이 쓰고 있을 때' 참고." >&2
       exit 1
     fi
+    for ip_ in "$CORP_DNS_PRIMARY" "$CORP_DNS_SECONDARY"; do
+      holder="$(port_holder "$ip_" 53)"
+      if [[ -n "$holder" ]]; then
+        echo "ERROR: ${ip_}:53 을 이미 다른 프로세스가 쓰고 있습니다: ${holder}" >&2
+        if [[ "$holder" == *named* ]]; then
+          echo "       bastion 의 named(BIND) 는 listen-on 이 any 면 새로 붙인 IP 의 53 도 자동으로 잡습니다." >&2
+          echo "       /etc/named.conf 의 listen-on 을 named 가 원래 쓰던 IP 로 좁히세요 (README 5-5b '53 을 bastion 의 named 가 쓰는 경우')." >&2
+        fi
+        exit 1
+      fi
+    done
     write_zone yes
     start_one primary "$CORP_DNS_PRIMARY"
     start_one secondary "$CORP_DNS_SECONDARY"
