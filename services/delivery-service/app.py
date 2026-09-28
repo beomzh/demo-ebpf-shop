@@ -27,6 +27,9 @@ COURIER_HOST = os.getenv("COURIER_HOST", "api.courier.example")
 COURIER_PORT = int(os.getenv("COURIER_PORT", "443"))
 COURIER_TIMEOUT = float(os.getenv("COURIER_TIMEOUT_SECONDS", "5"))
 COURIER_CA_FILE = os.getenv("COURIER_CA_FILE", "/etc/courier-ca/ca.crt")
+# 외부 호출 실패 시 스택 트레이스까지 남길지 (기본: 남김)
+LOG_STACKTRACE = os.getenv("LOG_STACKTRACE", "true").lower() == "true"
+SERVICE = "delivery-service"
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -95,7 +98,8 @@ def call_courier(tracking_no: str) -> dict:
         raise CourierError("http", ip, e) from e
 
     if resp.status != 200:
-        raise CourierError("http", ip, RuntimeError(f"status {resp.status}"))
+        err = RuntimeError(f"status {resp.status}")
+        raise CourierError("http", ip, err) from err
     return json.loads(body)
 
 
@@ -107,7 +111,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _send(self, status: int, payload: dict):
-        body = json.dumps(payload).encode()
+        body = json.dumps(payload, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -132,11 +136,17 @@ class Handler(BaseHTTPRequestHandler):
             data = call_courier(tracking_no)
         except CourierError as e:
             elapsed = time.monotonic() - started
-            log.warning(
-                "courier call failed req=%s order=%s tracking=%s stage=%s host=%s ip=%s elapsed=%.2fs err=%s",
-                req_id, order_id, tracking_no, e.stage, COURIER_HOST, e.ip, elapsed, e.__cause__,
+            reason = f"{e.stage}: {e.__cause__ or e} after {elapsed:.2f}s"
+            target = f"{COURIER_HOST}({e.ip}:{COURIER_PORT})"
+            # 실패 경로: 이 서비스 → 어디를 호출하다 [무엇 때문에] 실패했는지. 위 서비스들이 앞에 자기 구간을 붙인다
+            error_path = f"{SERVICE} → {target} [{reason}]"
+            log.error(
+                'upstream call failed req=%s target=%s call="GET https://%s/v1/tracking/%s" ip=%s stage=%s '
+                'elapsedMs=%d order=%s path="%s"',
+                req_id, COURIER_HOST, COURIER_HOST, tracking_no, e.ip, e.stage, elapsed * 1000, order_id, error_path,
+                exc_info=e if LOG_STACKTRACE else None,
             )
-            self._send(503, {"error": "courier unavailable", "orderId": order_id})
+            self._send(503, {"error": "courier unavailable", "orderId": order_id, "errorPath": error_path})
             return
 
         elapsed = time.monotonic() - started

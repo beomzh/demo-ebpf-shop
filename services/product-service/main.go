@@ -8,12 +8,14 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand/v2"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -53,6 +55,30 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // 실제 조회처럼 보이도록 5~30ms 지연을 준다.
 func jitter() { time.Sleep(time.Duration(5+rand.IntN(25)) * time.Millisecond) }
 
+// upstreamError 는 하위 서비스가 5xx 등으로 응답했을 때의 상태코드와 그 서비스가 보낸 실패 경로다.
+type upstreamError struct {
+	status int
+	path   string
+}
+
+func (e *upstreamError) Error() string { return fmt.Sprintf("status %d", e.status) }
+
+// errorPath 는 "product-service → <target>[상태]" 뒤에 하위 서비스가 보낸 실패 경로를 이어 붙인다.
+func errorPath(target string, err error) string {
+	var ue *upstreamError
+	if !errors.As(err, &ue) {
+		return fmt.Sprintf("product-service → %s [%v]", target, err)
+	}
+	head := fmt.Sprintf("product-service → %s[%d]", target, ue.status)
+	if ue.path == "" {
+		return head
+	}
+	if strings.HasPrefix(ue.path, target) {
+		return head + strings.TrimPrefix(ue.path, target)
+	}
+	return head + " → " + ue.path
+}
+
 // 재고 서비스 호출. 실패하면 재고 없이 상품만 돌려준다 (재고는 부가 정보).
 func fetchStock(id int, reqID string) (*int, error) {
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/inventory/%d", inventoryURL, id), nil)
@@ -66,7 +92,11 @@ func fetchStock(id int, reqID string) (*int, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("inventory-service status %d", resp.StatusCode)
+		var e struct {
+			ErrorPath string `json:"errorPath"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&e)
+		return nil, &upstreamError{status: resp.StatusCode, path: e.ErrorPath}
 	}
 	var body struct {
 		Stock int `json:"stock"`
@@ -106,8 +136,11 @@ func main() {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 			return
 		}
+		started := time.Now()
 		if stock, err := fetchStock(id, reqID); err != nil {
-			log.Printf("stock lookup failed req=%s id=%d err=%v", reqID, id, err)
+			// 재고는 부가 정보라 상품은 그대로 돌려주되, 어디를 호출하다 실패했는지 남긴다
+			log.Printf(`WARN upstream call failed req=%s target=inventory-service call="GET %s/inventory/%d" elapsedMs=%d path="%s" (재고 없이 응답)`,
+				reqID, inventoryURL, id, time.Since(started).Milliseconds(), errorPath("inventory-service", err))
 		} else {
 			p.Stock = stock
 		}

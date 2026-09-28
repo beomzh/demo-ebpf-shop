@@ -77,9 +77,17 @@ except OSError as e:
   show_firewall
 
   info "게이트웨이 → 주문 → 배송을 거친 배송 조회 1건"
-  kc -n "$INFRA_NS" exec deploy/loadgen -- \
-    curl -s -m 20 -o /dev/null -H 'X-Request-Id: status-check' -w '  HTTP %{http_code}  %{time_total}s\n' \
-    "http://gateway-service.${APP_NS}.svc.cluster.local:8080/api/orders/1001/tracking" || true
+  local out code_line body path
+  out="$(kc -n "$INFRA_NS" exec deploy/loadgen -- \
+    curl -s -m 20 -H 'X-Request-Id: status-check' -w '\n%{http_code} %{time_total}s' \
+    "http://gateway-service.${APP_NS}.svc.cluster.local:8080/api/orders/1001/tracking" 2>&1 || true)"
+  code_line="$(printf '%s\n' "$out" | tail -n 1)"
+  body="$(printf '%s\n' "$out" | sed '$d')"
+  echo "  HTTP ${code_line}"
+  # 실패하면 서비스들이 이어 붙인 실패 경로(errorPath)를 보여준다
+  path="$(printf '%s' "$body" | sed -n 's/.*"errorPath":"\([^"]*\)".*/\1/p')"
+  [[ -n "$path" ]] && echo "  실패 경로: ${path}"
+  return 0
 }
 
 case "${1:-}" in

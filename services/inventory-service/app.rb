@@ -29,7 +29,7 @@ module MiniRedis
       sock = connection
       sock.write("*#{args.size}\r\n" + args.map { |a| s = a.to_s; "$#{s.bytesize}\r\n#{s}\r\n" }.join)
       read_reply(sock)
-    rescue IOError, SystemCallError => e
+    rescue IOError, SystemCallError, SocketError => e
       reset
       attempts += 1
       retry if attempts < 2
@@ -83,6 +83,7 @@ end
 def json(res, status, body)
   res.status = status
   res['Content-Type'] = 'application/json'
+  res['Content-Type'] = 'application/json; charset=utf-8'
   res.body = JSON.generate(body)
 end
 
@@ -113,8 +114,11 @@ server.mount_proc('/inventory') do |req, res|
       json(res, 404, error: 'not found')
     end
   rescue MiniRedis::Error => e
-    LOG.warn("redis error req=#{req_id} #{req.request_method} #{req.path} err=#{e.message}")
-    json(res, 503, error: 'inventory store unavailable')
+    # 어디(Redis 어느 주소)를 호출하다 실패했는지 남기고, 위로 errorPath 를 전달한다
+    path = "inventory-service → redis(#{REDIS_HOST}:#{REDIS_PORT}) [#{e.message}]"
+    LOG.error("upstream call failed req=#{req_id} target=redis call=\"#{req.request_method} #{req.path}\" path=\"#{path}\"\n" +
+              e.full_message(highlight: false, order: :top))
+    json(res, 503, error: 'redis call failed', errorPath: path)
   rescue JSON::ParserError, ArgumentError, KeyError
     json(res, 400, error: 'invalid request')
   end

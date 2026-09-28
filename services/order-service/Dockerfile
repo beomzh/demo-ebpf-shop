@@ -11,4 +11,4 @@ WORKDIR /app
 COPY --from=build --chmod=644 /src/target/order-service.jar app.jar
 EXPOSE 8080
 USER 10001
-CMD ["java", "-jar", "app.jar"]
+CMD ["java", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8", "-jar", "app.jar"]

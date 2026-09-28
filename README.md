@@ -117,26 +117,56 @@ loadgen 은 사용자 역할이라 게이트웨이만 호출합니다. 게이트
 - 체크아웃 한 번에 서비스 간 HTTP 호출 8번 + DB 쿼리가 일어나, 서비스 간 연결선과 호출 수가 풍부하게 쌓입니다.
 - 프로토콜도 여러 가지입니다: HTTP(서비스 간), MySQL, Redis(RESP), DNS, HTTPS(배송 → 택배사).
 
-### 요청 ID (`X-Request-Id`)
+### 애플리케이션 로그로 실패 지점 찾기
 
-loadgen 이 요청마다 `X-Request-Id: lg-…` 를 붙이고, 모든 서비스가 받은 값을 **다음 호출에 그대로 넘기고 로그에 남깁니다.**
-한 요청이 어떤 서비스를 거쳐 어디서 실패했는지 로그로 이어서 볼 수 있습니다.
+모든 서비스는 다른 곳을 호출하다 실패하면 **같은 형식의 로그 한 줄**을 남기고, 에러 응답에 **실패 경로(`errorPath`)** 를 담아
+위로 돌려줍니다. 위 서비스는 받은 경로 앞에 자기 구간을 붙이므로, **가장 바깥(게이트웨이) 로그 한 줄에 실패 경로 전체가 보입니다.**
 
 ```
-$ ./demo.sh traffic
-09:10:21 502 5.034s lg-3fa9c1d2e8b0 GET /api/orders/1374/tracking
-
-$ oc -n shop logs deploy/delivery-service | grep lg-3fa9c1d2e8b0
-... courier call failed req=lg-3fa9c1d2e8b0 order=1374 stage=connect ip=<새 IP> elapsed=5.01s err=timed out
-$ oc -n shop logs deploy/order-service | grep lg-3fa9c1d2e8b0
-... delivery tracking failed req=lg-3fa9c1d2e8b0 orderId=1374 status=503 elapsedMs=5017
-$ oc -n shop logs deploy/gateway-service | grep lg-3fa9c1d2e8b0
-... tracking failed req=lg-3fa9c1d2e8b0 order=1374 status=502 elapsedMs=5034
+upstream call failed req=<요청 ID> target=<호출 대상> call="<메서드> <URL>" status=<응답 코드, 0=응답 없음> elapsedMs=<걸린 시간> path="<실패 경로>"
 ```
 
-> **eBPF 화면과의 관계**: 이 요청 ID 는 **로그용**입니다. eBPF 는 각 구간(게이트웨이→주문, 주문→배송 …)의
-> 요청 수·지연·오류를 서비스 간 연결선으로 보여주지만, 서비스 여러 개를 거친 **요청 1건을 끝까지 잇는 추적(분산 트레이스)** 은
+데모 사건(`incident`) 중 배송 조회 1건이 남기는 로그 (위에서 아래로 = 바깥에서 안쪽으로):
+
+```
+gateway-service  upstream call failed req=lg-3fa9c1d2e8b0 target=order-service call="GET http://order-service:8080/orders/1374/delivery" status=502 elapsedMs=5098
+                 path="gateway-service → order-service[502] → delivery-service[503] → api.courier.example(10.0.0.62:443) [connect: timed out after 5.01s]"
+order-service    upstream call failed req=lg-3fa9c1d2e8b0 target=delivery-service call="GET http://delivery-service:8080/deliveries/1374/tracking" status=503 elapsedMs=5059
+                 path="order-service → delivery-service[503] → api.courier.example(10.0.0.62:443) [connect: timed out after 5.01s]"
+delivery-service upstream call failed req=lg-3fa9c1d2e8b0 target=api.courier.example call="GET https://api.courier.example/v1/tracking/DX1512686139" ip=10.0.0.62 stage=connect elapsedMs=5006
+                 path="delivery-service → api.courier.example(10.0.0.62:443) [connect: timed out after 5.01s]"
+                 Traceback (most recent call last):
+                   File "/app/app.py", line 84, in call_courier
+                     raw = socket.create_connection((ip, COURIER_PORT), timeout=COURIER_TIMEOUT)
+                   ...
+                 TimeoutError: timed out
+```
+
+- `path` 의 `서비스[코드]` 는 그 서비스가 돌려준 HTTP 응답 코드, 마지막 `[…]` 는 실제로 실패한 원인입니다.
+- **예외가 실제로 난 곳**(연결 타임아웃·연결 거부·DB 오류)은 스택 트레이스를 함께 남깁니다: Python(배송), Java(주문·회원), C#(게이트웨이), Ruby(재고), Node.js(결제).
+- 요청 ID 는 loadgen 이 `lg-…` 로 붙이고(없으면 게이트웨이가 만듦) 모든 서비스가 다음 호출에 그대로 넘깁니다. `./demo.sh traffic` 에 요청 ID 가 찍히므로, 그 ID 로 서비스 로그를 검색하면 됩니다.
+- `./demo.sh status` 도 배송 조회가 실패하면 `실패 경로: …` 한 줄을 보여줍니다.
+
+다른 장애일 때 게이트웨이 로그의 실패 경로 (로컬에서 일부러 장애를 내어 확인한 실제 출력):
+
+| 장애 | 게이트웨이 로그의 `path` |
+| --- | --- |
+| 택배사 새 IP 차단 (데모 사건) | `gateway-service → order-service[502] → delivery-service[503] → api.courier.example(10.0.0.62:443) [connect: timed out after 5.01s]` |
+| MySQL 다운 | `gateway-service → order-service[502] → member-service[500] → mysql(mysql:3306) [CommunicationsException: Communications link failure]` |
+| Redis 다운 | `gateway-service → order-service[502] → inventory-service[503] → redis(redis:6379) [redis unavailable: …]` |
+| 결제 서비스 다운 | `gateway-service → order-service[504] → payment-service [HttpConnectTimeoutException: HTTP connect timed out after 2004ms]` |
+
+요청 ID 하나로 서비스별 로그 모아 보기:
+
+```bash
+ID=lg-3fa9c1d2e8b0
+for d in gateway-service order-service delivery-service; do echo "== $d"; oc -n shop logs deploy/$d | grep -A8 "req=$ID"; done
+```
+
+> **eBPF 화면과의 관계**: 실패 경로·요청 ID 는 **애플리케이션 로그**의 기능입니다. eBPF 는 각 구간(게이트웨이→주문, 주문→배송 …)의
+> 요청 수·지연·오류와 실패한 TCP 연결을 보여주지만, 서비스 여러 개를 거친 **요청 1건을 끝까지 잇는 추적(분산 트레이스)** 은
 > eBPF 만으로 만들지 않습니다 — 이 편의 한계 장표 내용이며, OpenTelemetry 와 함께 쓰는 EP05 에서 다룹니다.
+> 이 데모 대본은 eBPF 화면만으로 원인을 찾는 흐름이므로, 로그는 "코드를 고치지 않아도 eBPF 가 먼저 보여준다"를 뒷받침하는 확인용으로 씁니다.
 
 | 구성 요소 | 무엇을 흉내 내나 | 구현 |
 | --- | --- | --- |
@@ -820,6 +850,7 @@ oc adm policy add-scc-to-user privileged -z <agent-serviceaccount> -n <agent-nam
 
 | 증상 | 원인 / 조치 |
 | --- | --- |
+| 어디서 실패하는지 모르겠음 | `./demo.sh status` 의 `실패 경로`, 또는 `oc -n shop logs deploy/gateway-service \| grep "upstream call failed"` 의 `path=` 를 보면 끝까지 보입니다 ([2. 구성](#애플리케이션-로그로-실패-지점-찾기)) |
 | `incident` 후에도 배송 조회가 200 | 새 IP 가 이미 허용됨 (`./demo.sh firewall` 에 새 IP 규칙이 있으면 `./demo.sh reset` 후 다시) |
 | 장애 시 5초가 아니라 즉시 실패 | 경로 어딘가에서 RST/ICMP 거부 중. 택배사 호스트 방화벽이 새 IP 를 거부하고 있지 않은지 확인 |
 | 정상 상태에서도 연결 실패 | 택배사 호스트 nginx, 예전 IP 라우팅 확인 (`check` 4번) |

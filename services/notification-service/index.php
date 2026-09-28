@@ -17,8 +17,22 @@ function respond(int $status, array $body): never
 {
     http_response_code($status);
     header('Content-Type: application/json');
-    echo json_encode($body);
+    echo json_encode($body, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
+}
+
+/** "notification-service → <target>[상태]" 뒤에 하위 서비스가 보낸 errorPath 를 이어 붙인다 */
+function error_path(string $target, int $status, string $body, string $reason): string
+{
+    if ($status === 0) {
+        return "notification-service → $target [$reason]";
+    }
+    $head = "notification-service → {$target}[$status]";
+    $upstream = (json_decode($body, true) ?: [])['errorPath'] ?? '';
+    if ($upstream !== '') {
+        return str_starts_with($upstream, $target) ? $head . substr($upstream, strlen($target)) : "$head → $upstream";
+    }
+    return $head;
 }
 
 /** @return array{0:int,1:string} [상태코드, 본문] — 연결 실패·타임아웃이면 상태코드 0 */
@@ -33,7 +47,7 @@ function http_get(string $url, string $reqId, float $timeout): array
     ]]);
     $body = @file_get_contents($url, false, $ctx);
     if ($body === false || !isset($http_response_header[0])) {
-        return [0, ''];
+        return [0, (error_get_last()['message'] ?? 'connection failed')];
     }
     preg_match('#\s(\d{3})\s#', $http_response_header[0], $m);
     return [(int)($m[1] ?? 0), $body];
@@ -56,11 +70,15 @@ if ($method === 'POST' && $path === '/notifications') {
     $memberId = (int)$body['memberId'];
 
     $started = microtime(true);
-    [$status, $resp] = http_get("$memberUrl/members/$memberId", $reqId, 3.0);
+    $url = "$memberUrl/members/$memberId";
+    [$status, $resp] = http_get($url, $reqId, 3.0);
     if ($status !== 200) {
-        logmsg('WARN', sprintf('member lookup failed req=%s order=%d member=%d status=%d elapsedMs=%d',
-            $reqId, $orderId, $memberId, $status, (microtime(true) - $started) * 1000));
-        respond(502, ['error' => "member-service returned $status"]);
+        $ms = (int)((microtime(true) - $started) * 1000);
+        $path = error_path('member-service', $status, $resp, "$resp after {$ms}ms");
+        logmsg($status === 0 ? 'ERROR' : 'WARN', sprintf(
+            'upstream call failed req=%s target=member-service call="GET %s" status=%d elapsedMs=%d order=%d path="%s"',
+            $reqId, $url, $status, $ms, $orderId, $path));
+        respond($status === 0 ? 504 : 502, ['error' => 'member-service call failed', 'errorPath' => $path]);
     }
 
     $member = json_decode($resp, true) ?: [];

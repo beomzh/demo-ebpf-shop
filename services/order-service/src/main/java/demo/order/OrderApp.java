@@ -16,6 +16,7 @@ import java.time.Duration;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -27,12 +28,15 @@ import java.util.regex.Pattern;
  *   GET  /orders/{id}/delivery   배송 서비스 호출 (배송 조회 — 데모 사건 경로)
  *
  * 받은 X-Request-Id 를 모든 하위 호출에 그대로 넘긴다.
+ * 하위 호출이 실패하면 "어디를 호출하다 실패했는지"를 로그에 남기고, 응답의 errorPath 에 자기 구간을 앞에 붙여 위로 전달한다.
+ *   예) order-service → delivery-service[503] → api.courier.example(10.0.0.62:443) [connect: timed out after 5.00s]
  * 서비스 간 호출은 평문 HTTP/1.1 로 고정한다 (h2c 업그레이드를 쓰지 않음).
  * 배송 호출 타임아웃(10초)은 배송 서비스의 택배사 타임아웃(5초)보다 길게 잡아,
  * 배송 서비스가 돌려준 5xx 가 그대로 기록되게 한다.
  */
 public class OrderApp {
     private static final Logger log = Logger.getLogger("order-service");
+    private static final String SERVICE = "order-service";
 
     private static final String MEMBER_URL = env("MEMBER_URL", "http://member-service:8080");
     private static final String INVENTORY_URL = env("INVENTORY_URL", "http://inventory-service:8080");
@@ -47,12 +51,18 @@ public class OrderApp {
     private static final Pattern PRODUCT_ID = Pattern.compile("\"productId\"\\s*:\\s*(\\d+)");
     private static final Pattern QTY = Pattern.compile("\"qty\"\\s*:\\s*(\\d+)");
     private static final Pattern PRICE = Pattern.compile("\"price\"\\s*:\\s*(\\d+)");
+    private static final Pattern ERROR_PATH = Pattern.compile("\"errorPath\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
 
     private static final AtomicLong ORDER_SEQ = new AtomicLong(1000);
     private static final HttpClient HTTP = HttpClient.newBuilder()
             .version(HttpClient.Version.HTTP_1_1)
             .connectTimeout(Duration.ofSeconds(2))
             .build();
+
+    /** 하위 서비스 호출 결과. 연결 실패·타임아웃이면 status 0, error 에 예외. */
+    private record Upstream(String target, String method, String url, int status, String body, long ms, Exception error) {
+        boolean is(int expected) { return error == null && status == expected; }
+    }
 
     public static void main(String[] args) throws IOException {
         System.setProperty("java.util.logging.SimpleFormatter.format", "%1$tFT%1$tT %4$s order-service %5$s%6$s%n");
@@ -81,8 +91,8 @@ public class OrderApp {
             }
             send(ex, 404, "{\"error\":\"not found\"}");
         } catch (Exception e) {
-            log.warning("unhandled error req=" + reqId + " " + method + " " + path + ": " + e);
-            send(ex, 500, "{\"error\":\"internal error\"}");
+            log.log(Level.SEVERE, "unhandled error req=" + reqId + " " + method + " " + path, e);
+            send(ex, 500, "{\"error\":\"internal error\",\"errorPath\":\"" + jsonEscape(SERVICE + " [" + e + "]") + "\"}");
         }
     }
 
@@ -95,78 +105,89 @@ public class OrderApp {
         long orderId = ORDER_SEQ.incrementAndGet();
 
         // 1) 회원 확인 (회원 → MySQL)
-        HttpResponse<String> member = get(MEMBER_URL + "/members/" + memberId, reqId, DEFAULT_TIMEOUT);
-        if (member.statusCode() != 200) {
-            fail(ex, reqId, "member-service", member.statusCode(), "memberId=" + memberId);
-            return;
-        }
+        Upstream member = call("member-service", "GET", MEMBER_URL + "/members/" + memberId, reqId, DEFAULT_TIMEOUT, null);
+        if (!member.is(200)) { fail(ex, reqId, member, "orderId=" + orderId); return; }
 
         // 2) 재고 차감 (재고 → Redis)
-        HttpResponse<String> stock = post(INVENTORY_URL + "/inventory/" + productId + "/reserve", reqId,
-                "{\"qty\":" + qty + "}");
-        if (stock.statusCode() != 200) {
-            fail(ex, reqId, "inventory-service", stock.statusCode(), "productId=" + productId);
-            return;
-        }
+        Upstream stock = call("inventory-service", "POST", INVENTORY_URL + "/inventory/" + productId + "/reserve", reqId,
+                DEFAULT_TIMEOUT, "{\"qty\":" + qty + "}");
+        if (!stock.is(200)) { fail(ex, reqId, stock, "orderId=" + orderId); return; }
 
         // 3) 결제 (결제 → 회원)
-        HttpResponse<String> payment = post(PAYMENT_URL + "/payments", reqId,
+        Upstream payment = call("payment-service", "POST", PAYMENT_URL + "/payments", reqId, DEFAULT_TIMEOUT,
                 "{\"orderId\":" + orderId + ",\"memberId\":" + memberId + ",\"amount\":" + amount + "}");
-        if (payment.statusCode() != 201) {
-            fail(ex, reqId, "payment-service", payment.statusCode(), "orderId=" + orderId);
-            return;
-        }
+        if (!payment.is(201)) { fail(ex, reqId, payment, "orderId=" + orderId); return; }
 
-        // 4) 알림 (알림 → 회원). 알림 실패는 주문을 실패시키지 않는다
-        try {
-            HttpResponse<String> noti = post(NOTIFICATION_URL + "/notifications", reqId,
-                    "{\"orderId\":" + orderId + ",\"memberId\":" + memberId + "}");
-            if (noti.statusCode() != 202) {
-                log.warning("notification failed req=" + reqId + " orderId=" + orderId + " status=" + noti.statusCode());
-            }
-        } catch (IOException e) {
-            log.warning("notification error req=" + reqId + " orderId=" + orderId + " err=" + e);
-        }
+        // 4) 알림 (알림 → 회원). 알림 실패는 로그만 남기고 주문은 성공시킨다
+        Upstream noti = call("notification-service", "POST", NOTIFICATION_URL + "/notifications", reqId, DEFAULT_TIMEOUT,
+                "{\"orderId\":" + orderId + ",\"memberId\":" + memberId + "}");
+        if (!noti.is(202)) logFailure(reqId, noti, "orderId=" + orderId + " (주문은 계속 진행)");
 
         send(ex, 201, "{\"orderId\":" + orderId + ",\"memberId\":" + memberId + ",\"productId\":" + productId
                 + ",\"qty\":" + qty + ",\"amount\":" + amount + "}");
     }
 
-    private static void trackDelivery(HttpExchange ex, String reqId, String orderId) throws IOException {
+    private static void trackDelivery(HttpExchange ex, String reqId, String orderId) throws Exception {
+        Upstream delivery = call("delivery-service", "GET", DELIVERY_URL + "/deliveries/" + orderId + "/tracking", reqId,
+                DELIVERY_TIMEOUT, null);
+        if (delivery.is(200)) {
+            send(ex, 200, delivery.body());
+            return;
+        }
+        fail(ex, reqId, delivery, "orderId=" + orderId);
+    }
+
+    /** 하위 서비스 호출. 예외를 던지지 않고 결과(Upstream)로 돌려준다. */
+    private static Upstream call(String target, String method, String url, String reqId, Duration timeout, String json)
+            throws InterruptedException {
         long started = System.nanoTime();
+        HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(url)).timeout(timeout).header("X-Request-Id", reqId);
+        if (json == null) {
+            b.GET();
+        } else {
+            b.header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(json));
+        }
         try {
-            HttpResponse<String> resp = get(DELIVERY_URL + "/deliveries/" + orderId + "/tracking", reqId, DELIVERY_TIMEOUT);
-            long ms = (System.nanoTime() - started) / 1_000_000;
-            if (resp.statusCode() == 200) {
-                send(ex, 200, resp.body());
-                return;
-            }
-            log.warning("delivery tracking failed req=" + reqId + " orderId=" + orderId + " status=" + resp.statusCode() + " elapsedMs=" + ms);
-            send(ex, 502, "{\"error\":\"delivery-service returned " + resp.statusCode() + "\",\"orderId\":" + orderId + "}");
-        } catch (Exception e) {
-            long ms = (System.nanoTime() - started) / 1_000_000;
-            log.warning("delivery tracking error req=" + reqId + " orderId=" + orderId + " elapsedMs=" + ms + " err=" + e);
-            send(ex, 504, "{\"error\":\"delivery-service unreachable\",\"orderId\":" + orderId + "}");
+            HttpResponse<String> r = HTTP.send(b.build(), HttpResponse.BodyHandlers.ofString());
+            return new Upstream(target, method, url, r.statusCode(), r.body(), (System.nanoTime() - started) / 1_000_000, null);
+        } catch (IOException e) {
+            return new Upstream(target, method, url, 0, "", (System.nanoTime() - started) / 1_000_000, e);
         }
     }
 
-    private static void fail(HttpExchange ex, String reqId, String service, int status, String detail) throws IOException {
-        log.warning("order failed req=" + reqId + " " + service + " status=" + status + " " + detail);
-        send(ex, 502, "{\"error\":\"" + service + " returned " + status + "\"}");
+    /** 실패 로그를 남기고, 위(게이트웨이)로 errorPath 를 담은 502/504 를 돌려준다. */
+    private static void fail(HttpExchange ex, String reqId, Upstream u, String detail) throws IOException {
+        String path = logFailure(reqId, u, detail);
+        int status = u.error() != null ? 504 : 502;
+        send(ex, status, "{\"error\":\"" + u.target() + " call failed\",\"errorPath\":\"" + jsonEscape(path) + "\"}");
     }
 
-    private static HttpResponse<String> get(String url, String reqId, Duration timeout) throws IOException, InterruptedException {
-        return HTTP.send(HttpRequest.newBuilder(URI.create(url)).timeout(timeout)
-                        .header("X-Request-Id", reqId).GET().build(),
-                HttpResponse.BodyHandlers.ofString());
+    private static String logFailure(String reqId, Upstream u, String detail) {
+        String path = errorPath(u);
+        String msg = "upstream call failed req=" + reqId + " target=" + u.target() + " call=\"" + u.method() + " " + u.url()
+                + "\" status=" + u.status() + " elapsedMs=" + u.ms() + " " + detail + " path=\"" + path + "\"";
+        if (u.error() != null) {
+            log.log(Level.SEVERE, msg, u.error());   // 연결 실패·타임아웃은 스택 트레이스까지
+        } else {
+            log.warning(msg);
+        }
+        return path;
     }
 
-    private static HttpResponse<String> post(String url, String reqId, String json) throws IOException, InterruptedException {
-        return HTTP.send(HttpRequest.newBuilder(URI.create(url)).timeout(DEFAULT_TIMEOUT)
-                        .header("X-Request-Id", reqId)
-                        .header("Content-Type", "application/json")
-                        .POST(HttpRequest.BodyPublishers.ofString(json)).build(),
-                HttpResponse.BodyHandlers.ofString());
+    /** "order-service → <target>[상태]" 뒤에 하위 서비스가 보낸 errorPath 를 이어 붙인다. */
+    private static String errorPath(Upstream u) {
+        if (u.error() != null) {
+            return SERVICE + " → " + u.target() + " [" + u.error().getClass().getSimpleName()
+                    + (u.error().getMessage() == null ? "" : ": " + u.error().getMessage()) + " after " + u.ms() + "ms]";
+        }
+        String head = SERVICE + " → " + u.target() + "[" + u.status() + "]";
+        Matcher m = ERROR_PATH.matcher(u.body() == null ? "" : u.body());
+        if (m.find()) {
+            String upstream = jsonUnescape(m.group(1));
+            if (upstream.startsWith(u.target())) return head + upstream.substring(u.target().length());
+            return head + " → " + upstream;
+        }
+        return head;
     }
 
     private static String requestId(HttpExchange ex) {
@@ -179,6 +200,40 @@ public class OrderApp {
         return m.find() ? m.group(1) : def;
     }
 
+    private static String jsonEscape(String s) {
+        StringBuilder b = new StringBuilder();
+        for (char c : s.toCharArray()) {
+            switch (c) {
+                case '"' -> b.append("\\\"");
+                case '\\' -> b.append("\\\\");
+                case '\n' -> b.append("\\n");
+                case '\r' -> b.append("\\r");
+                case '\t' -> b.append("\\t");
+                default -> { if (c < 0x20) b.append(String.format("\\u%04x", (int) c)); else b.append(c); }
+            }
+        }
+        return b.toString();
+    }
+
+    private static String jsonUnescape(String s) {
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c != '\\' || i + 1 >= s.length()) { b.append(c); continue; }
+            char n = s.charAt(++i);
+            switch (n) {
+                case 'n' -> b.append('\n');
+                case 't' -> b.append('\t');
+                case 'r' -> b.append('\r');
+                case 'u' -> {
+                    if (i + 4 < s.length()) { b.append((char) Integer.parseInt(s.substring(i + 1, i + 5), 16)); i += 4; }
+                }
+                default -> b.append(n);
+            }
+        }
+        return b.toString();
+    }
+
     private static String readBody(InputStream in) throws IOException {
         try (in) {
             return new String(in.readAllBytes(), StandardCharsets.UTF_8);
@@ -187,7 +242,7 @@ public class OrderApp {
 
     private static void send(HttpExchange ex, int status, String json) throws IOException {
         byte[] body = json.getBytes(StandardCharsets.UTF_8);
-        ex.getResponseHeaders().set("Content-Type", "application/json");
+        ex.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
         ex.sendResponseHeaders(status, body.length);
         try (OutputStream os = ex.getResponseBody()) {
             os.write(body);

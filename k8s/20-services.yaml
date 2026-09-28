@@ -98,7 +98,7 @@ spec:
           image: __REGISTRY__/shop-member-service:__TAG__
           imagePullPolicy: Always
           env:
-            - { name: DB_URL, value: "jdbc:mysql://mysql:3306/shop?useSSL=false&allowPublicKeyRetrieval=true" }
+            - { name: DB_URL, value: "jdbc:mysql://mysql:3306/shop?useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=2000&socketTimeout=2000" }
             - name: DB_USER
               valueFrom: { secretKeyRef: { name: mysql-auth, key: MYSQL_USER } }
             - name: DB_PASSWORD

@@ -16,6 +16,19 @@ function log(level, msg) {
   console.log(`${new Date().toISOString()} ${level} payment-service ${msg}`);
 }
 
+const SERVICE = 'payment-service';
+
+// "payment-service → <target>[상태]" 뒤에 하위 서비스가 보낸 errorPath 를 이어 붙인다
+function errorPath(target, result) {
+  if (result.status === 0) return `${SERVICE} → ${target} [${result.error} after ${result.ms}ms]`;
+  const head = `${SERVICE} → ${target}[${result.status}]`;
+  try {
+    const upstream = JSON.parse(result.body).errorPath;
+    if (upstream) return upstream.startsWith(target) ? head + upstream.slice(target.length) : `${head} → ${upstream}`;
+  } catch (_) { /* 본문이 JSON 이 아니면 상태코드까지만 */ }
+  return head;
+}
+
 function send(res, status, payload) {
   const body = JSON.stringify(payload);
   res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
@@ -33,6 +46,7 @@ function readBody(req) {
 
 // 회원 조회. 연결 실패·타임아웃이면 status 0
 function getMember(memberId, reqId) {
+  const started = Date.now();
   return new Promise((resolve) => {
     const req = http.get({
       host: MEMBER_URL.hostname,
@@ -44,10 +58,10 @@ function getMember(memberId, reqId) {
     }, (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
-      res.on('end', () => resolve({ status: res.statusCode, body: data }));
+      res.on('end', () => resolve({ status: res.statusCode, body: data, ms: Date.now() - started }));
     });
     req.on('timeout', () => req.destroy(new Error('timeout')));
-    req.on('error', (err) => resolve({ status: 0, body: '', error: err.message }));
+    req.on('error', (err) => resolve({ status: 0, body: '', error: `${err.code || err.name}: ${err.message}`, stack: err.stack, ms: Date.now() - started }));
   });
 }
 
@@ -73,8 +87,12 @@ const server = http.createServer(async (req, res) => {
 
     const member = await getMember(body.memberId, reqId);
     if (member.status !== 200) {
-      log('WARN', `member lookup failed req=${reqId} memberId=${body.memberId} status=${member.status} ${member.error || ''}`);
-      return send(res, 502, { error: `member-service returned ${member.status}` });
+      const path = errorPath('member-service', member);
+      const url = `${MEMBER_URL.origin}/members/${body.memberId}`;
+      log(member.status === 0 ? 'ERROR' : 'WARN',
+        `upstream call failed req=${reqId} target=member-service call="GET ${url}" status=${member.status} elapsedMs=${member.ms} orderId=${body.orderId} path="${path}"`
+        + (member.stack ? `\n${member.stack}` : ''));
+      return send(res, member.status === 0 ? 504 : 502, { error: 'member-service call failed', errorPath: path });
     }
     const grade = JSON.parse(member.body).grade;
     const charged = grade === 'VIP' ? Math.round(body.amount * 0.9) : body.amount;

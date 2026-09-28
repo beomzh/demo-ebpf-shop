@@ -14,6 +14,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.concurrent.Executors;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
@@ -24,8 +25,10 @@ public class MemberApp {
     private static final Logger log = Logger.getLogger("member-service");
 
     private static final String DB_URL = env("DB_URL",
-            "jdbc:mysql://mysql:3306/shop?useSSL=false&allowPublicKeyRetrieval=true");
+            "jdbc:mysql://mysql:3306/shop?useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=2000&socketTimeout=2000");
     private static final String DB_USER = env("DB_USER", "shop");
+    // 로그용: jdbc:mysql://mysql:3306/shop?... → mysql:3306
+    private static final String DB_HOST = DB_URL.replaceFirst("^jdbc:mysql://([^/?]+).*$", "$1");
     private static final String DB_PASSWORD = env("DB_PASSWORD", "shop");
 
     // 요청 스레드마다 커넥션 1개를 재사용한다 (데모용 초간단 풀).
@@ -54,23 +57,41 @@ public class MemberApp {
             return;
         }
 
+        String json;
         try {
-            PreparedStatement ps = conn().prepareStatement("SELECT id, name, grade FROM members WHERE id = ?");
+            json = queryMember(id);
+        } catch (SQLException stale) {
+            // MySQL 재시작 등으로 끊긴 연결일 수 있으니 새 연결로 한 번 더 시도한다
+            resetConn();
+            try {
+                json = queryMember(id);
+            } catch (SQLException e) {
+                // 어디(MySQL 어느 주소)를 호출하다 실패했는지 남기고, 위로 errorPath 를 전달한다
+                String reason = String.valueOf(e.getMessage()).lines().findFirst().orElse("");
+                String path = "member-service → mysql(" + DB_HOST + ") [" + e.getClass().getSimpleName() + ": " + reason + "]";
+                log.log(Level.SEVERE, "upstream call failed req=" + reqId + " target=mysql call=\"SELECT members WHERE id=" + id
+                        + "\" path=\"" + path + "\"", e);
+                resetConn();
+                send(ex, 500, "{\"error\":\"db error\",\"errorPath\":\"" + path.replace("\\", "\\\\").replace("\"", "\\\"") + "\"}");
+                return;
+            }
+        }
+        if (json == null) {
+            send(ex, 404, "{\"error\":\"not found\"}");
+        } else {
+            send(ex, 200, json);
+        }
+    }
+
+    /** 회원 1명 조회. 없으면 null. */
+    private static String queryMember(long id) throws SQLException {
+        try (PreparedStatement ps = conn().prepareStatement("SELECT id, name, grade FROM members WHERE id = ?")) {
             ps.setLong(1, id);
             try (ResultSet rs = ps.executeQuery()) {
-                if (!rs.next()) {
-                    send(ex, 404, "{\"error\":\"not found\"}");
-                    return;
-                }
-                send(ex, 200, String.format("{\"id\":%d,\"name\":\"%s\",\"grade\":\"%s\"}",
-                        rs.getLong("id"), rs.getString("name"), rs.getString("grade")));
-            } finally {
-                ps.close();
+                if (!rs.next()) return null;
+                return String.format("{\"id\":%d,\"name\":\"%s\",\"grade\":\"%s\"}",
+                        rs.getLong("id"), rs.getString("name"), rs.getString("grade"));
             }
-        } catch (SQLException e) {
-            log.warning("member query failed req=" + reqId + " id=" + id + " err=" + e.getMessage());
-            resetConn();
-            send(ex, 500, "{\"error\":\"db error\"}");
         }
     }
 
@@ -125,7 +146,7 @@ public class MemberApp {
 
     private static void send(HttpExchange ex, int status, String json) throws IOException {
         byte[] body = json.getBytes(StandardCharsets.UTF_8);
-        ex.getResponseHeaders().set("Content-Type", "application/json");
+        ex.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
         ex.sendResponseHeaders(status, body.length);
         try (OutputStream os = ex.getResponseBody()) {
             os.write(body);

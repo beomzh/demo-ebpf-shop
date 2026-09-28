@@ -53,7 +53,7 @@ services:
     <<: [*common, *ocp-restricted]
     build: ../services/member-service
     environment:
-      DB_URL: jdbc:mysql://mysql:3306/shop?useSSL=false&allowPublicKeyRetrieval=true
+      DB_URL: jdbc:mysql://mysql:3306/shop?useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=2000&socketTimeout=2000
       DB_USER: shop
       DB_PASSWORD: local-only
     depends_on: [mysql]
