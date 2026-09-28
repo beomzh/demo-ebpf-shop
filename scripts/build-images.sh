@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 다섯 서비스 이미지를 빌드하고(--push 면) 레지스트리에 올린다.
+# 여덟 서비스 이미지를 빌드하고(--push 면) 레지스트리에 올린다.
 #   ./scripts/build-images.sh            # 빌드만
 #   ./scripts/build-images.sh --push     # 빌드 + push
 #

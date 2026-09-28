@@ -84,6 +84,23 @@ fw-delivery-default             배송 서비스 egress 기본 규칙: DNS 만 �
 
 ---
 
+## 추가 시나리오 — 외부 PG 도메인 DNS 장애 (선택)
+
+택배사 사건과 별개로 촬영합니다. 자세한 동작·로그는 [README 6-2](../README.md#6-2-추가-시나리오--외부-pg-도메인-dns-장애).
+
+| 순서 | 명령 | 화면 | 보여줄 것 | 말할 것 |
+| --- | --- | --- | --- | --- |
+| 1 | `./demo.sh pg-missing` | 결제·주문 서비스 상세 → DNS 탭 | `api.pg.example` 조회의 NXDOMAIN 증가 | 사내 DNS 에 PG 도메인이 없다 — 코드가 아니라 DNS 등록 문제 |
+| 2 | (터미널) `oc -n demo-shop logs deploy/order-service \| grep UnknownHost` | 애플리케이션 로그 | Java `java.net.UnknownHostException`, Node.js `queryA ENOTFOUND` | eBPF 가 먼저 보여준 원인을 앱 로그가 뒷받침한다 |
+| 3 | `./demo.sh pg-reset` → `./demo.sh pg-primary-down` | DNS 탭, 체크아웃 지연 | DNS 조회 지연·타임아웃, 체크아웃 약 4초 | 주 DNS 가 죽으면 보조로 넘어가지만 매번 2초씩 기다린다 |
+| 4 | (터미널) `… \| grep "dns fallback"` | 애플리케이션 로그 | `primary … → ETIMEOUT (2003ms) \| secondary … → IP` | 어느 DNS 가 죽었는지까지 로그에 남는다 |
+| 5 | `./demo.sh pg-reset` | | 지연 해소 | |
+
+- 촬영 전 `./demo.sh pg-status` 로 주·보조 모두 PG 도메인을 돌려주는지, 체크아웃이 201 인지 확인합니다.
+- PG 호출(HTTPS)의 내용은 Java·Node.js 라 eBPF 로 볼 수 없습니다. 대본에서 "PG 호출 오류율" 대신 **DNS 탭의 NXDOMAIN·지연**으로 말합니다.
+
+---
+
 ## 촬영 전 확인 (실제 화면에서)
 
 - [ ] 연결에 한 번도 성공하지 못한 외부 목적지(새 IP)가 토폴로지 맵에 노드로 그려지는가

@@ -8,7 +8,8 @@
 #                      ├→ member → MySQL
 #                      └→ order ─┬→ member → MySQL
 #                                ├→ inventory → Redis
-#                                ├→ payment → member
+#                                ├→ 외부 PG사 (카드 혜택 조회, HTTPS) — PG 도메인은 사내 DNS 로 조회
+#                                ├→ payment → member, 외부 PG사 (승인, HTTPS)
 #                                ├→ notification → member
 #                                └→ delivery → 외부 택배사 (HTTPS)
 #
@@ -44,6 +45,7 @@ spec:
             - { name: MEMBER_URL, value: "http://member-service:8080" }
             - { name: ORDER_URL, value: "http://order-service:8080" }
             - { name: TRACKING_TIMEOUT_SECONDS, value: "15" }
+            - { name: CHECKOUT_TIMEOUT_SECONDS, value: "10" }
             - { name: DOTNET_gcServer, value: "0" }
           ports:
             - containerPort: 8080
@@ -273,6 +275,10 @@ spec:
             - { name: NOTIFICATION_URL, value: "http://notification-service:8080" }
             - { name: DELIVERY_URL, value: "http://delivery-service:8080" }
             - { name: DELIVERY_TIMEOUT_SECONDS, value: "10" }
+            - { name: PG_DOMAIN, value: "__PG_DOMAIN__" }
+            - { name: PG_DNS_SERVERS, value: "__PG_DNS_SERVERS__" }
+            - { name: PG_DNS_TIMEOUT_MS, value: "2000" }
+            - { name: PG_CA_FILE, value: "/etc/demo-ca/ca.crt" }
           ports:
             - containerPort: 8080
           readinessProbe:
@@ -287,9 +293,12 @@ spec:
             limits: { memory: 512Mi }
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
+            - { name: demo-ca, mountPath: /etc/demo-ca, readOnly: true }
       volumes:
         - name: tmp
           emptyDir: {}
+        - name: demo-ca
+          secret: { secretName: courier-ca }
 ---
 apiVersion: v1
 kind: Service
@@ -327,6 +336,10 @@ spec:
           imagePullPolicy: Always
           env:
             - { name: MEMBER_URL, value: "http://member-service:8080" }
+            - { name: PG_DOMAIN, value: "__PG_DOMAIN__" }
+            - { name: PG_DNS_SERVERS, value: "__PG_DNS_SERVERS__" }
+            - { name: PG_DNS_TIMEOUT_MS, value: "2000" }
+            - { name: PG_CA_FILE, value: "/etc/demo-ca/ca.crt" }
           ports:
             - containerPort: 8080
           readinessProbe:
@@ -341,9 +354,12 @@ spec:
             limits: { memory: 256Mi }
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
+            - { name: demo-ca, mountPath: /etc/demo-ca, readOnly: true }
       volumes:
         - name: tmp
           emptyDir: {}
+        - name: demo-ca
+          secret: { secretName: courier-ca }
 ---
 apiVersion: v1
 kind: Service

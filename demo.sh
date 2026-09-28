@@ -10,7 +10,7 @@ usage() {
 사용법: ./demo.sh <명령>
 
 [준비 — 순서대로 한 번]
-  certs            택배사 사설 CA·서버 인증서 생성 (courier-ext/certs)
+  certs            외부 API(택배사·PG) 사설 CA·서버 인증서 생성 (courier-ext/certs)
   registry-route   OpenShift 내부 레지스트리 default route 열기 (클러스터당 한 번, cluster-admin)
   check            사전 점검: 로그인·route·커널·CNI·택배사 도달·인증서
   push             이미지 빌드 → ImageStream 생성 → 내부 레지스트리 route 로 push
@@ -26,11 +26,18 @@ usage() {
   baseline         reset 과 같음
   traffic          부하 발생기 로그 실시간 보기 (Ctrl+C 로 종료)
 
+[추가 시나리오 — 외부 PG사 도메인 DNS 장애]
+  pg-missing       사내 DNS 에 PG 도메인 없음 (NXDOMAIN → UnknownHostException / queryA ENOTFOUND)
+  pg-primary-down  사내 주 DNS 장애 (타임아웃 → 보조 DNS 로 넘어감, 결제 지연)
+  pg-reset         PG 시나리오 복구
+  pg-status        사내 DNS 서버별 응답과 체크아웃 1건
+  corpdns <명령>   bastion 사내 DNS 조작 (up | down | status | logs | record-remove | record-add | primary-down | primary-up)
+
 [유지보수]
   build            이미지 빌드만 (push 안 함)
-  restart          다섯 서비스 재시작 (같은 TAG 로 다시 push 한 뒤 반영할 때)
+  restart          여덟 서비스 재시작 (같은 TAG 로 다시 push 한 뒤 반영할 때)
   images           ImageStream 과 태그 목록
-  cleanup          shop, demo-infra 네임스페이스 삭제 (ImageStream 포함)
+  cleanup          demo-shop, demo-infra 네임스페이스 삭제 (ImageStream 포함)
 
 [로컬 스모크 테스트 — 클러스터 없이 podman/docker 로 앱만 확인]
   local-up | local-fail | local-heal | local-down
@@ -61,8 +68,9 @@ case "$cmd" in
   push)           $S/build-images.sh --push ;;
   deploy)         $S/deploy.sh ;;
   security)       $S/security-check.sh ;;
-  status|incident|fix|reset|baseline|firewall|traffic)
+  status|incident|fix|reset|baseline|firewall|traffic|pg-missing|pg-primary-down|pg-reset|pg-status)
                   $S/scenario.sh "$cmd" ;;
+  corpdns)        ./corpdns-ext/run.sh "$@" ;;
   restart)
     source $S/lib.sh; load_env
     for svc in "${SERVICES[@]}"; do kc -n "$APP_NS" rollout restart "deploy/$svc"; done

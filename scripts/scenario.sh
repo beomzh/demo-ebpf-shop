@@ -8,6 +8,12 @@
 #   status     현재 DNS 응답·방화벽 규칙·연결 가능 여부·배송 조회 결과 요약
 #   firewall   방화벽 규칙 목록만 출력 (데모 3-4 "방화벽 규칙 확인" 장면용)
 #   traffic    부하 발생기 로그 실시간 보기
+#
+# 추가 시나리오 — 외부 PG사 도메인 DNS 장애 (주문·결제 서비스가 사내 DNS 로 PG 도메인 조회)
+#   pg-missing       사내 DNS 에 PG 도메인이 없음 → NXDOMAIN (Java UnknownHostException, Node queryA ENOTFOUND)
+#   pg-primary-down  사내 주 DNS 장애 → 타임아웃 후 보조 DNS 로 넘어감 (결제 지연, dns fallback 로그)
+#   pg-reset         PG 시나리오 원상 복구
+#   pg-status        사내 DNS 서버별 응답과 체크아웃 1건 결과
 source "$(dirname "$0")/lib.sh"
 load_env
 
@@ -90,6 +96,79 @@ except OSError as e:
   return 0
 }
 
+# ── PG 도메인 DNS 시나리오 ────────────────────────────────────
+PG_NETPOL=fw-corpdns-primary-unreachable
+
+corpdns() {   # bastion 모드: 이 호스트의 corpdns-ext 로 사내 DNS 를 조작한다
+  local runner=("$ROOT/corpdns-ext/run.sh" "$@")
+  [[ $EUID -eq 0 ]] || runner=(sudo "${runner[@]}")
+  "${runner[@]}"
+}
+
+set_pg_domain() {
+  info "주문·결제 서비스 PG_DOMAIN=$1 (재시작)"
+  kc -n "$APP_NS" set env deploy/order-service deploy/payment-service "PG_DOMAIN=$1" >/dev/null
+  kc -n "$APP_NS" rollout status deploy/order-service --timeout=180s >/dev/null
+  kc -n "$APP_NS" rollout status deploy/payment-service --timeout=180s >/dev/null
+}
+
+block_primary_dns() {
+  info "주문·결제 서비스 → 주 DNS(${CORP_DNS_PRIMARY}) 패킷 차단 (응답 없음 = 타임아웃)"
+  kc apply -f - >/dev/null <<EOF
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ${PG_NETPOL}
+  namespace: ${APP_NS}
+  labels:
+    demo.observ/scenario: pg-dns
+  annotations:
+    demo.observ/description: "주 사내 DNS ${CORP_DNS_PRIMARY} 장애 흉내 (corporate 모드)"
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app, operator: In, values: [order-service, payment-service] }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: ["${CORP_DNS_PRIMARY}/32"]
+EOF
+}
+
+pg_status() {
+  info "사내 DNS (${CORP_DNS_MODE} 모드) — 결제 서비스 파드에서 서버별로 ${PG_DOMAIN} 조회"
+  kc -n "$APP_NS" exec deploy/payment-service -- node -e "
+const dns = require('node:dns');
+(async () => {
+  const host = process.env.PG_DOMAIN;
+  for (const [i, s] of process.env.PG_DNS_SERVERS.split(',').entries()) {
+    const r = new dns.promises.Resolver({ timeout: 2000, tries: 1 }); r.setServers([s]);
+    const t = Date.now();
+    try { console.log('  ' + (i ? 'secondary' : 'primary  ') + ' ' + s + '  ' + host + ' → ' + (await r.resolve4(host)).join(',') + ' (' + (Date.now() - t) + 'ms)'); }
+    catch (e) { console.log('  ' + (i ? 'secondary' : 'primary  ') + ' ' + s + '  ' + host + ' → ' + e.code + ' (' + (Date.now() - t) + 'ms)'); }
+  }
+})();" || warn "payment-service exec 실패"
+  [[ "$CORP_DNS_MODE" == bastion ]] && { info "bastion 사내 DNS 컨테이너"; corpdns status || true; }
+  kc -n "$APP_NS" get netpol "$PG_NETPOL" >/dev/null 2>&1 && warn "주 DNS 차단 정책(${PG_NETPOL}) 적용 중"
+
+  info "게이트웨이 → 주문 → 결제 → PG 를 거친 체크아웃 1건"
+  local out code_line body path
+  out="$(kc -n "$INFRA_NS" exec deploy/loadgen -- \
+    curl -s -m 20 -H 'X-Request-Id: pg-status-check' -H 'Content-Type: application/json' -X POST \
+    -d '{"memberId":10,"productId":3,"qty":1}' -w '\n%{http_code} %{time_total}s' \
+    "http://gateway-service.${APP_NS}.svc.cluster.local:8080/api/checkout" 2>&1 || true)"
+  code_line="$(printf '%s\n' "$out" | tail -n 1)"
+  body="$(printf '%s\n' "$out" | sed '$d')"
+  echo "  HTTP ${code_line}"
+  path="$(printf '%s' "$body" | sed -n 's/.*"errorPath":"\([^"]*\)".*/\1/p')"
+  [[ -n "$path" ]] && echo "  실패 경로: ${path}"
+  return 0
+}
+
 case "${1:-}" in
   baseline|reset)
     remove_new_ip
@@ -105,11 +184,38 @@ case "${1:-}" in
     allow_new_ip
     ok "해결: 방화벽에 ${COURIER_NEW_IP}:443 허용 추가"
     ;;
+  pg-missing)
+    if [[ "$CORP_DNS_MODE" == bastion ]]; then
+      corpdns record-remove
+    else
+      set_pg_domain "$PG_UNREGISTERED_DOMAIN"
+    fi
+    ok "PG 도메인 레코드 없음 재현 — 체크아웃이 실패합니다 (로그: UnknownHostException / queryA ENOTFOUND)"
+    ;;
+  pg-primary-down)
+    if [[ "$CORP_DNS_MODE" == bastion ]]; then
+      corpdns primary-down
+    else
+      block_primary_dns
+    fi
+    ok "주 DNS 장애 재현 — 체크아웃이 약 4초로 느려지고 dns fallback 로그가 남습니다"
+    ;;
+  pg-reset)
+    if [[ "$CORP_DNS_MODE" == bastion ]]; then
+      corpdns record-add
+      corpdns primary-up
+    else
+      kc -n "$APP_NS" delete netpol "$PG_NETPOL" --ignore-not-found >/dev/null
+      set_pg_domain "$PG_DOMAIN"
+    fi
+    ok "PG 시나리오 복구"
+    ;;
+  pg-status) pg_status ;;
   status)   status ;;
   firewall) show_firewall ;;
   traffic)  kc -n "$INFRA_NS" logs -f deploy/loadgen --tail=20 ;;
   *)
-    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
     ;;
 esac

@@ -1,0 +1,8 @@
+# 로컬 스모크 테스트용 사내 DNS (주·보조가 같은 설정·같은 존 파일을 쓴다)
+.:53 {
+    file /etc/coredns/db.corp . {
+        reload 2s
+    }
+    log . "{remote} corp-dns {type} {name} {rcode} {duration}"
+    errors
+}

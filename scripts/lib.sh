@@ -28,6 +28,11 @@ load_env() {
   : "${CONTAINER_ENGINE:=auto}" "${REGISTRY_TLS_VERIFY:=false}" "${PLATFORM:=linux/amd64}"
   : "${LOADGEN_ORDER_INTERVAL:=1}" "${LOADGEN_TRACKING_INTERVAL:=1}" "${LOADGEN_REPLICAS:=1}" "${LOADGEN_BROWSE_INTERVAL:=1}"
   [[ "$COURIER_OLD_IP" != "$COURIER_NEW_IP" ]] || die "COURIER_OLD_IP 와 COURIER_NEW_IP 가 같습니다."
+  : "${PG_DOMAIN:=api.pg.example}" "${PG_IP:=}" "${CORP_DNS_MODE:=bastion}" "${PG_UNREGISTERED_DOMAIN:=api.pg-new.example}"
+  : "${CORP_DNS_PRIMARY:=}" "${CORP_DNS_SECONDARY:=}"
+  PG_IP="${PG_IP:-$COURIER_OLD_IP}"
+  case "$CORP_DNS_MODE" in bastion|corporate) ;; *) die "CORP_DNS_MODE 는 bastion 또는 corporate 이어야 합니다 (현재: $CORP_DNS_MODE)" ;; esac
+  [[ -n "$CORP_DNS_PRIMARY" && -n "$CORP_DNS_SECONDARY" ]] || die "demo.env 에 CORP_DNS_PRIMARY, CORP_DNS_SECONDARY 를 채우세요 (demo.env.example 참고)."
   case "$REGISTRY_MODE" in
     ocp-internal) ;;
     external) [[ -n "$REGISTRY" ]] || die "REGISTRY_MODE=external 이면 REGISTRY 를 채워야 합니다." ;;
@@ -113,6 +118,8 @@ render() {
     -e "s#__LOADGEN_TRACKING_INTERVAL__#${LOADGEN_TRACKING_INTERVAL}#g" \
     -e "s#__LOADGEN_REPLICAS__#${LOADGEN_REPLICAS}#g" \
     -e "s#__LOADGEN_BROWSE_INTERVAL__#${LOADGEN_BROWSE_INTERVAL}#g" \
+    -e "s#__PG_DOMAIN__#${PG_DOMAIN}#g" \
+    -e "s#__PG_DNS_SERVERS__#${CORP_DNS_PRIMARY},${CORP_DNS_SECONDARY}#g" \
     "$1"
 }
 

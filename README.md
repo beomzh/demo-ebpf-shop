@@ -44,8 +44,8 @@ eBPF 가 가장 잘 보여줄 수 있는 사건입니다. 화면에 나오는 �
 | 회원 `member-service` | Java 21 | 게이트웨이, 주문, 결제, 알림 | MySQL |
 | 상품 `product-service` | Go 1.22 | 게이트웨이 | 재고 |
 | 재고 `inventory-service` | Ruby 3.3 | 상품, 주문 | Redis |
-| 주문 `order-service` | Java 21 | 게이트웨이 | 회원, 재고, 결제, 알림, 배송 |
-| 결제 `payment-service` | Node.js 20 | 주문 | 회원 (VIP 할인 확인) |
+| 주문 `order-service` | Java 21 | 게이트웨이 | 회원, 재고, **외부 PG사**(카드 혜택 조회), 결제, 알림, 배송 |
+| 결제 `payment-service` | Node.js 20 | 주문 | 회원 (VIP 할인 확인), **외부 PG사**(승인) |
 | 알림 `notification-service` | PHP 8.3 | 주문 | 회원 (연락처·등급 확인) |
 | 배송 `delivery-service` | Python 3.12 | 주문 | 외부 택배사 API (HTTPS). **모니터링 없음** |
 
@@ -57,6 +57,9 @@ eBPF 가 가장 잘 보여줄 수 있는 사건입니다. 화면에 나오는 �
 | 화요일 09:20 | DNS 는 정상, 새 IP 로의 연결이 실패 → 방화벽에 새 IP 가 없음 | 데모 2, 3 | `./demo.sh firewall` |
 | 화요일 09:40 | 방화벽 허용 후 실패 연결이 없어진 것 확인 | 데모 4 | `./demo.sh fix` |
 | 다음 주 | 여덟 서비스를 같은 기준으로 보는 공통 대시보드로 표준화 | 데모 4 | |
+
+외부 PG사 도메인은 클러스터 DNS 가 아니라 **사내 DNS(주·보조)** 로 조회합니다. 이것을 이용한 추가 시나리오
+(사내 DNS 에 PG 도메인 없음 / 주 DNS 장애)는 [6-2](#6-2-추가-시나리오--외부-pg-도메인-dns-장애) 에 있습니다.
 
 ---
 
@@ -83,9 +86,14 @@ flowchart LR
     FW{{"방화벽<br/>NetworkPolicy egress"}}
   end
 
-  subgraph ext["클러스터 밖: 택배사 호스트"]
-    OLD["예전 IP :443"]
-    NEW["새 IP :443"]
+  subgraph ext["클러스터 밖: 외부 API 호스트 (택배사·PG사 nginx)"]
+    OLD["택배사 예전 IP :443<br/>(PG사도 이 IP)"]
+    NEW["택배사 새 IP :443"]
+  end
+
+  subgraph corp["클러스터 밖: 사내 DNS"]
+    P1["주 DNS"]
+    P2["보조 DNS"]
   end
 
   LG --> GW
@@ -95,6 +103,11 @@ flowchart LR
   ORD --> MEM
   ORD --> INV
   ORD --> PAY --> MEM
+  ORD -.->|"PG 카드 혜택 (HTTPS)"| OLD
+  PAY -.->|"PG 승인 (HTTPS)"| OLD
+  ORD -.->|"PG 도메인 조회"| P1
+  PAY -.->|"PG 도메인 조회"| P1
+  P1 -.->|"실패 시"| P2
   ORD --> NOTI --> MEM
   ORD -->|"배송 조회"| DLV
   DLV -.->|DNS| DNS
@@ -109,13 +122,13 @@ loadgen 은 사용자 역할이라 게이트웨이만 호출합니다. 게이트
 
 | 사용자 요청 | 호출 경로 | 깊이 |
 | --- | --- | --- |
-| 체크아웃 `POST /api/checkout` | 게이트웨이 → 상품 → 재고 → Redis<br/>게이트웨이 → 주문 → 회원 → MySQL<br/>　　　　　　　　 → 재고 → Redis<br/>　　　　　　　　 → 결제 → 회원 → MySQL<br/>　　　　　　　　 → 알림 → 회원 → MySQL | 최대 5 |
+| 체크아웃 `POST /api/checkout` | 게이트웨이 → 상품 → 재고 → Redis<br/>게이트웨이 → 주문 → 회원 → MySQL<br/>　　　　　　　　 → 재고 → Redis<br/>　　　　　　　　 → **외부 PG사** (카드 혜택, 사내 DNS 로 조회)<br/>　　　　　　　　 → 결제 → 회원 → MySQL<br/>　　　　　　　　　　　 → **외부 PG사** (승인, 사내 DNS 로 조회)<br/>　　　　　　　　 → 알림 → 회원 → MySQL | 최대 5 |
 | 배송 조회 `GET /api/orders/{id}/tracking` | 게이트웨이 → 주문 → 배송 → **외부 택배사 (HTTPS)** ← 데모 사건 경로 | 4 |
 | 상품 보기 `GET /api/products/{id}` | 게이트웨이 → 상품 → 재고 → Redis | 4 |
 | 회원 보기 `GET /api/members/{id}` | 게이트웨이 → 회원 → MySQL | 3 |
 
-- 체크아웃 한 번에 서비스 간 HTTP 호출 8번 + DB 쿼리가 일어나, 서비스 간 연결선과 호출 수가 풍부하게 쌓입니다.
-- 프로토콜도 여러 가지입니다: HTTP(서비스 간), MySQL, Redis(RESP), DNS, HTTPS(배송 → 택배사).
+- 체크아웃 한 번에 서비스 간 HTTP 호출 8번 + 외부 PG 호출 2번 + DB 쿼리가 일어나, 연결선과 호출 수가 풍부하게 쌓입니다.
+- 프로토콜도 여러 가지입니다: HTTP(서비스 간), MySQL, Redis(RESP), DNS(클러스터 DNS·사내 DNS), HTTPS(배송 → 택배사, 주문·결제 → PG사).
 
 ### 애플리케이션 로그로 실패 지점 찾기
 
@@ -198,6 +211,7 @@ for d in gateway-service order-service delivery-service; do echo "== $d"; oc -n 
 | 5-3 설정 파일 | 작업 PC | `cp demo.env.example demo.env` → IP 2개 수정 | 처음 한 번 |
 | 5-4 인증서 | 작업 PC | `./demo.sh certs` | 처음 한 번 |
 | 5-5 택배사 호스트 | 택배사 호스트 | 보조 IP 추가 → `sudo ./run.sh up` | 처음 한 번 |
+| 5-5b 사내 DNS (PG 시나리오) | bastion | IP 2개 추가 → `./demo.sh certs` → `sudo ./courier-ext/run.sh up` → `sudo ./demo.sh corpdns up` | 처음 한 번 |
 | 5-6 레지스트리 route | 작업 PC | `./demo.sh registry-route` | 클러스터당 한 번 |
 | 5-7 사전 점검 | 작업 PC | `./demo.sh check` | 배포 전 |
 | 5-8 이미지 push | 작업 PC | `./demo.sh push` | 처음·코드 변경 때 |
@@ -242,6 +256,17 @@ for d in gateway-service order-service delivery-service; do echo "== $d"; oc -n 
 | IP | **2개** — 기본 IP(= 예전 IP) + 보조 IP(= 새 IP). 클러스터 노드에서 두 IP 의 443 으로 연결 가능해야 함 |
 | 컨테이너 | `podman` 또는 `docker` |
 | 포트 | 443/TCP 열림 |
+
+택배사 호스트의 nginx 는 **외부 PG사 API 도 함께 응답**합니다 (TLS SNI 로 구분). PG 도메인은 `PG_IP`(기본: 택배사 예전 IP)를 가리킵니다.
+
+### 사내 DNS (추가 시나리오용)
+
+주문·결제 서비스는 PG 도메인을 **사내 DNS(주·보조)** 에 직접 물어봅니다. 두 가지 중 하나로 준비합니다 (`CORP_DNS_MODE`).
+
+| 모드 | 사내 DNS | 시나리오 재현 방법 | 준비 |
+| --- | --- | --- | --- |
+| `bastion` (기본) | 이 저장소의 `corpdns-ext/` 로 bastion 에 주·보조 DNS 2대 (CoreDNS) | 레코드를 실제로 지우고, 주 DNS 를 실제로 멈춘다 | bastion 에 IP 2개 추가, 53/udp 비어 있어야 함 |
+| `corporate` | 실제 사내 DNS 서버 2대 | 사내 DNS 는 건드리지 않는다. 등록 안 된 새 PG 도메인으로 교체 / 주 DNS 로 가는 패킷 차단(NetworkPolicy) | 사내 DNS 에 `PG_DOMAIN → PG_IP` A 레코드 등록, 노드 → 사내 DNS 53/udp 허용 |
 
 > **예전 IP·새 IP 고르기**: 택배사 호스트의 현재 IP 를 예전 IP 로, 같은 서브넷에서 비어 있는 IP 하나를 새 IP 로
 > 정하면 됩니다. 네트워크 담당자에게 사용 가능한 IP 를 확인하세요.
@@ -310,6 +335,11 @@ COURIER_NEW_IP=10.0.0.62     # 택배사 호스트에 새로 붙일 보조 IP
 | `CONTAINER_ENGINE` | `auto` | `podman` 우선, 없으면 `docker` |
 | `REGISTRY_TLS_VERIFY` | `false` | default route 인증서 검증. OCP 기본 인그레스 인증서는 보통 사설이라 `false` |
 | `PLATFORM` | `linux/amd64` | 클러스터 노드 아키텍처 |
+| `PG_DOMAIN` | `api.pg.example` | 외부 PG사 도메인 (공인 DNS 등록 불필요) |
+| `PG_IP` | (비움 = `COURIER_OLD_IP`) | PG 도메인이 가리킬 IP. 택배사 호스트 nginx 가 PG 도 응답 |
+| `CORP_DNS_PRIMARY` / `CORP_DNS_SECONDARY` | `10.0.0.63` / `10.0.0.64` | 사내 DNS 주·보조 IP |
+| `CORP_DNS_MODE` | `bastion` | `bastion`(이 저장소로 띄움) 또는 `corporate`(실제 사내 DNS) |
+| `PG_UNREGISTERED_DOMAIN` | `api.pg-new.example` | corporate 모드의 "레코드 없음" 재현에 쓸, 사내 DNS 에 없는 도메인 |
 | `LOADGEN_REPLICAS` | `1` | 부하 발생기 파드 수 (파드 1개 = 초당 체크아웃·배송 조회·둘러보기 각 1건) — [6-1](#6-1-요청량-늘리기) |
 | `LOADGEN_*_INTERVAL` | `1` | 파드 하나의 요청 간격(초) |
 
@@ -480,6 +510,61 @@ curl -sk --resolve api.courier.example:443:10.0.0.62 https://api.courier.example
 
 지정한 IP 가 호스트에 붙어 있지 않으면 `run.sh` 가 `ERROR: … 가 이 호스트에 없습니다` 로 멈춥니다 (3 을 먼저 할 것).
 
+### 5-5b. 사내 DNS 준비 — PG 시나리오용
+
+#### bastion 모드 (`CORP_DNS_MODE=bastion`) **[bastion]**
+
+bastion 에 IP 2개를 더 붙이고, 그 두 IP 의 53 에서만 받는 주·보조 DNS 를 띄웁니다.
+
+① 53 을 이미 쓰는 프로그램이 있는지 확인합니다. `0.0.0.0:53`·`*:53` 으로 모든 IP 를 잡고 있으면 먼저 정리해야 합니다
+(5-5 의 "443 을 이미 다른 프로그램이 쓰고 있을 때"와 같은 방법 — 그 프로그램을 자기 IP 로 좁히기). `127.0.0.53:53`(systemd-resolved) 처럼 특정 IP 만 쓰면 괜찮습니다.
+
+```bash
+sudo ss -lunp | grep ':53 '
+```
+
+② 빈 IP 2개를 골라 붙이고 `demo.env` 에 넣습니다 (예: `10.0.0.63`, `10.0.0.64`, NIC/prefix 는 호스트에 맞게):
+
+```bash
+ping -c 2 -W 1 10.0.0.63; ping -c 2 -W 1 10.0.0.64     # 100% packet loss 여야 함
+sudo ./courier-ext/setup-ips.sh add ens192 10.0.0.63/24
+sudo ./courier-ext/setup-ips.sh add ens192 10.0.0.64/24
+sed -i 's/^CORP_DNS_PRIMARY=.*/CORP_DNS_PRIMARY=10.0.0.63/; s/^CORP_DNS_SECONDARY=.*/CORP_DNS_SECONDARY=10.0.0.64/' demo.env
+```
+
+③ PG 인증서를 만들고(이미 있으면 건너뜀) 외부 API nginx 를 새 설정으로 다시 띄운 뒤, 사내 DNS 를 띄웁니다:
+
+```bash
+./demo.sh certs                 # pg.crt 발급 (기존 CA·택배사 인증서는 그대로)
+sudo ./courier-ext/run.sh up    # nginx 재기동 — 택배사 + PG 서버 블록
+sudo ./demo.sh corpdns up       # 주·보조 DNS 기동
+# corp-dns-primary   Up ...
+# corp-dns-secondary Up ...
+# 사내 DNS: primary 10.0.0.63, secondary 10.0.0.64  |  api.pg.example → 10.0.0.61
+```
+
+④ 확인 (bastion 에 `dig` 가 없으면 `sudo dnf install -y bind-utils`):
+
+```bash
+dig +short @10.0.0.63 api.pg.example          # 10.0.0.61
+dig +short @10.0.0.64 api.pg.example          # 10.0.0.61
+dig @10.0.0.63 nothing.example | grep status  # NXDOMAIN — 없는 이름에는 권한 있는 NXDOMAIN
+curl -sk --resolve api.pg.example:443:10.0.0.61 https://api.pg.example/health   # ok
+```
+
+- 두 IP 는 재부팅하면 사라지므로 촬영 기간 동안은 `nmcli` 로 영구 설정하세요 (5-5 참고). 재부팅 후 `sudo ./demo.sh corpdns up` 다시 실행.
+- 존 파일·Corefile 은 `corpdns-ext/.rendered/` 에 만들어집니다 (git 에 올라가지 않음). 질의 로그: `sudo ./demo.sh corpdns logs primary`
+
+#### corporate 모드 (`CORP_DNS_MODE=corporate`) **[사내 DNS 담당자에게 요청]**
+
+1. `demo.env`: `CORP_DNS_MODE=corporate`, `CORP_DNS_PRIMARY`·`CORP_DNS_SECONDARY` 에 실제 사내 DNS IP
+2. 사내 DNS 에 A 레코드 등록: `api.pg.example → <PG_IP>` (주·보조 모두에 반영되는지 확인)
+3. `PG_UNREGISTERED_DOMAIN`(기본 `api.pg-new.example`)은 **등록하지 않습니다** — "레코드 없음" 재현에 씁니다
+4. 클러스터 노드 → 사내 DNS 53/udp·tcp 가 열려 있는지 확인
+5. 외부 API nginx 는 bastion 모드와 같이 `./demo.sh certs` → `sudo ./courier-ext/run.sh up`
+
+두 모드 모두 `./demo.sh check` 의 5번 항목(`[클러스터 → 사내 DNS …] … OK`, `[클러스터 → PG] … OK`)이 통과해야 합니다.
+
 ### 5-6. 내부 레지스트리 route 열기 **[작업 PC]** — 클러스터당 한 번
 
 ```bash
@@ -640,6 +725,81 @@ oc scale deploy/loadgen -n demo-infra --replicas=3
 - 요청 종류별로 조절하려면 `LOADGEN_ORDER_INTERVAL`(체크아웃), `LOADGEN_TRACKING_INTERVAL`(배송 조회), `LOADGEN_BROWSE_INTERVAL`(둘러보기)을 바꿉니다.
 - 멈추기: `oc scale deploy/loadgen -n demo-infra --replicas=0` / 다시 시작: `--replicas=<원래 값>`
 
+### 6-2. 추가 시나리오 — 외부 PG 도메인 DNS 장애
+
+체크아웃 중 **주문 서비스(Java)** 는 PG사 카드 혜택 조회, **결제 서비스(Node.js)** 는 PG사 승인을 호출합니다.
+두 서비스 모두 PG 도메인을 클러스터 DNS 가 아닌 **사내 DNS 에 주 → 보조 순서로 직접 질의**합니다.
+
+- 주 DNS 가 응답하지 않으면(타임아웃·거부) 보조 DNS 로 넘어갑니다.
+- **NXDOMAIN 은 "그런 이름은 없다"는 확정 응답이라 보조 DNS 로 넘어가지 않고** 바로 실패합니다 (OS 리졸버와 같은 동작).
+- 카드 혜택 조회는 선택 기능이라 실패해도 주문은 계속되고, 결제 승인이 실패하면 체크아웃이 실패합니다.
+  그래서 같은 DNS 장애가 **Java 와 Node.js 로그에 각각 어떻게 찍히는지** 한 번에 볼 수 있습니다.
+
+| 명령 | 상황 | bastion 모드에서 실제로 하는 일 | corporate 모드에서 실제로 하는 일 | 사용자 결과 |
+| --- | --- | --- | --- | --- |
+| `./demo.sh pg-missing` | 사내 DNS 에 PG 도메인이 없음 | 사내 DNS 존에서 레코드 삭제 | 주문·결제의 `PG_DOMAIN` 을 사내 DNS 에 없는 `PG_UNREGISTERED_DOMAIN` 으로 교체 (PG사 도메인 이전을 사내 DNS 에 등록 안 한 상황) | 체크아웃 **502**, 즉시 |
+| `./demo.sh pg-primary-down` | 사내 주 DNS 장애 | 주 DNS 컨테이너 일시정지 (안 되면 nftables 로 53 drop) | 주문·결제 → 주 DNS 패킷 drop (NetworkPolicy) | 체크아웃 **201**, 약 4초로 느려짐 |
+| `./demo.sh pg-reset` | 복구 | 레코드 복구, 주 DNS 재개 | 도메인 원복, 차단 정책 삭제 | 체크아웃 201, 수십 ms |
+| `./demo.sh pg-status` | 확인 | 서버별 조회 결과 + 체크아웃 1건 + 실패 경로 | 〃 | |
+
+택배사 시나리오(`incident`)와 독립적이라 함께 켜도 되지만, 화면이 섞이지 않게 하나씩 촬영하는 것을 권장합니다.
+
+#### 레코드 없음 (`pg-missing`) — 애플리케이션 로그
+
+주문(Java) — 카드 혜택 없이 진행:
+```
+SEVERE order-service upstream call failed req=lg-… target=pg(api.pg.example) call="GET https://api.pg.example/v1/card-benefits" status=0 elapsedMs=3 orderId=1006 (카드 혜택 없이 진행)
+       path="order-service → pg(api.pg.example) [java.net.UnknownHostException: api.pg.example: Name or service not known (NXDOMAIN from primary 10.0.0.63) after 3ms]"
+java.net.UnknownHostException: api.pg.example: Name or service not known (NXDOMAIN from primary 10.0.0.63)
+	at demo.order.CorpDnsResolverProvider.lookupViaCorpDns(CorpDnsResolverProvider.java:81)
+	at java.base/java.net.InetAddress.getAllByName(Unknown Source)
+	at java.base/java.net.InetAddress.getByName(Unknown Source)
+	at demo.order.OrderApp.pgCardBenefits(OrderApp.java:173)
+	...
+Caused by: javax.naming.NameNotFoundException: DNS name not found [response code 3]; remaining name 'api.pg.example'
+```
+
+결제(Node.js) — 승인 실패 → 체크아웃 실패:
+```
+ERROR payment-service upstream call failed req=lg-… target=pg(api.pg.example) call="POST https://api.pg.example/v1/payments/approve" status=0 elapsedMs=1 orderId=1006
+      dns="primary 10.0.0.63 → ENOTFOUND (0ms)" path="payment-service → pg(api.pg.example) [queryA ENOTFOUND api.pg.example — primary 10.0.0.63 → ENOTFOUND (0ms)]"
+Error: queryA ENOTFOUND api.pg.example
+    at QueryReqWrap.onresolve [as oncomplete] (node:internal/dns/promises:292:17)
+```
+
+게이트웨이 — 실패 경로 한 줄:
+```
+path="gateway-service → order-service[502] → payment-service[504] → pg(api.pg.example) [queryA ENOTFOUND api.pg.example — primary 10.0.0.63 → ENOTFOUND (0ms)]"
+```
+
+#### 주 DNS 장애 (`pg-primary-down`) — 애플리케이션 로그
+
+주 DNS 가 2초 안에 답하지 않아 보조 DNS 로 넘어가고, 요청은 성공하지만 느려집니다:
+```
+WARNING order-service dns fallback req=lg-… host=api.pg.example attempts="primary 10.0.0.63 → SocketTimeoutException (2002ms) | secondary 10.0.0.64 → 10.0.0.61 (2ms)"
+WARN payment-service dns fallback req=lg-… host=api.pg.example attempts="primary 10.0.0.63 → ETIMEOUT (2003ms) | secondary 10.0.0.64 → 10.0.0.61 (2ms)"
+```
+
+주·보조 둘 다 응답하지 않으면(참고: 보조까지 멈추려면 bastion 에서 `sudo podman pause corp-dns-secondary`):
+```
+java.net.UnknownHostException: api.pg.example: Temporary failure in name resolution (primary 10.0.0.63 → SocketTimeoutException (2003ms), secondary 10.0.0.64 → SocketTimeoutException (2006ms))
+Caused by: javax.naming.CommunicationException: DNS error [Root exception is java.net.SocketTimeoutException]; remaining name 'api.pg.example'
+Error: queryA ETIMEOUT api.pg.example
+```
+
+| 상황 | Java (주문) | Node.js (결제) |
+| --- | --- | --- |
+| 레코드 없음 (NXDOMAIN) | `java.net.UnknownHostException: … Name or service not known`<br/>← `javax.naming.NameNotFoundException` | `Error: queryA ENOTFOUND` |
+| 주 DNS 무응답 → 보조 성공 | `dns fallback … SocketTimeoutException (2002ms) \| secondary … → IP` | `dns fallback … ETIMEOUT (2003ms) \| secondary … → IP` |
+| 주·보조 모두 무응답 | `java.net.UnknownHostException: … Temporary failure in name resolution`<br/>← `javax.naming.CommunicationException` ← `java.net.SocketTimeoutException` | `Error: queryA ETIMEOUT` |
+
+#### eBPF 화면에서 볼 것
+
+- 주문·결제 서비스 상세 → **DNS 탭**: `api.pg.example` 조회의 **NXDOMAIN 증가**(`pg-missing`), 조회 **지연·타임아웃**(`pg-primary-down`)
+- 주문·결제 → 사내 DNS IP(주·보조) 로 나가는 DNS 질의가 서비스 밖 목적지로 보임
+- 체크아웃 요청(게이트웨이 → 주문 → 결제)의 오류율(`pg-missing`) 또는 지연 증가(`pg-primary-down`)
+- PG 호출 자체는 HTTPS 이고 Java·Node.js 의 TLS 내용은 eBPF 로 볼 수 없으므로(10장), **원인 설명은 DNS 탭 + 애플리케이션 로그**로 합니다
+
 ---
 
 ## 7. 코드를 바꾼 뒤 다시 반영하기 (git pull 이후)
@@ -654,6 +814,9 @@ oc login ...               # 세션이 만료됐다면
 ./demo.sh status
 ```
 
+- **PG 시나리오가 추가된 버전으로 업데이트할 때**: 배포 전에 `demo.env` 에 PG·사내 DNS 항목을 추가하고(`diff demo.env.example demo.env`),
+  [5-5b](#5-5b-사내-dns-준비--pg-시나리오용) 를 먼저 하세요 (`./demo.sh certs` → `sudo ./courier-ext/run.sh up` → `sudo ./demo.sh corpdns up`).
+  PG·사내 DNS 준비 없이 배포하면 체크아웃이 PG 승인 단계에서 실패합니다.
 - **네임스페이스 이름이 `shop` → `demo-shop` 으로 바뀐 버전으로 업데이트할 때**: 이전 `shop` 네임스페이스(파드·ImageStream 포함)는
   자동으로 지워지지 않습니다. 새 버전을 `push` → `deploy` 한 뒤 옛 네임스페이스를 지우세요:
   `oc delete namespace shop` (demo-infra 는 그대로 씁니다)
@@ -684,6 +847,11 @@ oc login ...               # 세션이 만료됐다면
 | `fix` | 방화벽에 새 IP 허용 | `scripts/scenario.sh fix` |
 | `reset` / `baseline` | 새 IP 규칙 삭제, DNS 를 예전 IP 로 | `scripts/scenario.sh reset` |
 | `traffic` | 부하 발생기 로그 실시간 | `scripts/scenario.sh traffic` |
+| `pg-missing` | PG 도메인 레코드 없음 재현 | `scripts/scenario.sh pg-missing` |
+| `pg-primary-down` | 사내 주 DNS 장애 재현 | `scripts/scenario.sh pg-primary-down` |
+| `pg-reset` | PG 시나리오 복구 | `scripts/scenario.sh pg-reset` |
+| `pg-status` | 사내 DNS 서버별 조회 + 체크아웃 1건 | `scripts/scenario.sh pg-status` |
+| `corpdns <명령>` | bastion 사내 DNS: `up`·`down`·`status`·`logs`·`record-remove`·`record-add`·`primary-down`·`primary-up` (root) | `corpdns-ext/run.sh` |
 | `restart` | 여덟 서비스 재시작 | `demo.sh` |
 | `images` | ImageStream·태그·pull 주소 | `demo.sh` |
 | `cleanup` | `demo-shop`, `demo-infra` 삭제 (ImageStream 포함, 확인 질문 있음) | `scripts/cleanup.sh` |
@@ -853,6 +1021,10 @@ oc adm policy add-scc-to-user privileged -z <agent-serviceaccount> -n <agent-nam
 
 | 증상 | 원인 / 조치 |
 | --- | --- |
+| 배포 후 체크아웃이 전부 502, 경로 끝이 `pg(api.pg.example) [queryA ENOTFOUND …]` | 사내 DNS 에 PG 도메인이 없음 — `pg-missing` 을 켜 둔 상태인지(`./demo.sh pg-reset`), bastion 사내 DNS 를 띄웠는지(`sudo ./demo.sh corpdns status`) |
+| 체크아웃이 항상 4초 이상, `dns fallback` WARN 반복 | 주 DNS 가 응답하지 않음 — `pg-primary-down` 상태인지(`./demo.sh pg-reset`), 노드 → 주 DNS 53/udp 가 막혀 있지 않은지 |
+| 경로 끝이 `pg(…) [… SSLHandshakeException …]` / `unable to verify the first certificate` | PG 인증서를 데모 CA 로 검증하지 못함 — `./demo.sh certs` 후 `sudo ./courier-ext/run.sh up`, `courier-ca` 시크릿이 같은 CA 인지 (`./demo.sh deploy`) |
+| `./demo.sh corpdns up` 이 `다른 프로그램이 모든 IP 의 53/udp 를 쓰고 있습니다` | bastion 의 dnsmasq·named 등이 `0.0.0.0:53` 사용 중 — 그 프로그램을 자기 IP 로 좁히거나(5-5 의 443 방법과 같음) 별도 VM 사용 |
 | 어디서 실패하는지 모르겠음 | `./demo.sh status` 의 `실패 경로`, 또는 `oc -n demo-shop logs deploy/gateway-service \| grep "upstream call failed"` 의 `path=` 를 보면 끝까지 보입니다 ([2. 구성](#애플리케이션-로그로-실패-지점-찾기)) |
 | `incident` 후에도 배송 조회가 200 | 새 IP 가 이미 허용됨 (`./demo.sh firewall` 에 새 IP 규칙이 있으면 `./demo.sh reset` 후 다시) |
 | 장애 시 5초가 아니라 즉시 실패 | 경로 어딘가에서 RST/ICMP 거부 중. 택배사 호스트 방화벽이 새 IP 를 거부하고 있지 않은지 확인 |
@@ -900,6 +1072,10 @@ oc -n demo-infra logs deploy/courier-dns -f     # DNS 질의 로그
 # [택배사 호스트]
 sudo ./run.sh down
 sudo ./setup-ips.sh del <NIC> <COURIER_NEW_IP>/<prefix>
+# 사내 DNS (bastion 모드)
+sudo ./demo.sh corpdns down
+sudo ./courier-ext/setup-ips.sh del <NIC> <CORP_DNS_PRIMARY>/<prefix>
+sudo ./courier-ext/setup-ips.sh del <NIC> <CORP_DNS_SECONDARY>/<prefix>
 ```
 
 내부 레지스트리 default route 를 다시 닫으려면(선택, cluster-admin):
@@ -924,7 +1100,8 @@ sudo ./setup-ips.sh del <NIC> <COURIER_NEW_IP>/<prefix>
 │   ├── payment-service/      Node.js 20 (node:http, 의존성 없음) → 회원
 │   ├── notification-service/ PHP 8.3 (내장 웹서버) → 회원
 │   └── delivery-service/     Python 3.12 (표준 라이브러리만, 시스템 libssl) → 외부 택배사
-├── courier-ext/              택배사 호스트용: run.sh(nginx 기동), setup-ips.sh(보조 IP), gen-certs.sh
+├── courier-ext/              외부 API 호스트용 (택배사·PG사 nginx): run.sh, setup-ips.sh(보조 IP), gen-certs.sh
+├── corpdns-ext/              사내 DNS 주·보조 (bastion 모드): run.sh
 ├── k8s/                      매니페스트 (__PLACEHOLDER__ 는 scripts 가 채움)
 │   ├── 00-namespaces.yaml
 │   ├── 10-mysql.yaml

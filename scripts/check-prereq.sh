@@ -102,7 +102,38 @@ for ip in "$COURIER_OLD_IP" "$COURIER_NEW_IP"; do
   fi
 done
 
-info "5) 택배사 인증서"
+info "5) 사내 DNS (${CORP_DNS_MODE} 모드) 와 외부 PG — 클러스터 안(임시 파드)에서"
+for dns_ip in "$CORP_DNS_PRIMARY" "$CORP_DNS_SECONDARY"; do
+  out="$(kc run "corpdns-probe-$RANDOM" -n default --rm -i --restart=Never --quiet \
+         --pod-running-timeout=90s --image=docker.io/library/busybox:1.36 -- \
+         nslookup -type=a -timeout=2 "$PG_DOMAIN" "$dns_ip" 2>&1 || true)"
+  if printf '%s' "$out" | grep -q "Address: ${PG_IP}\b"; then
+    ok "  [클러스터 → 사내 DNS ${dns_ip}] ${PG_DOMAIN} → ${PG_IP} OK"
+  else
+    warn "  [클러스터 → 사내 DNS ${dns_ip}] ${PG_DOMAIN} 조회 실패: $(printf '%s' "$out" | grep -vE '^(Server|Address:.*#53|$)' | tr '\n' ' ' | sed 's/  */ /g')"
+    if [[ "$CORP_DNS_MODE" == bastion ]]; then
+      warn "      → bastion 에서 './demo.sh corpdns up' 했는지, IP 가 붙어 있는지 확인 (README 5-5b)"
+    else
+      warn "      → 사내 DNS 에 ${PG_DOMAIN} → ${PG_IP} A 레코드 등록, 노드에서 ${dns_ip}:53/udp 로 갈 수 있는지 확인 (README 5-5b)"
+    fi
+    fail=1
+  fi
+done
+out="$(kc run "pg-probe-$RANDOM" -n default --rm -i --restart=Never --quiet \
+       --pod-running-timeout=90s --image=docker.io/curlimages/curl:8.10.1 -- \
+       sh -c "curl -sSk -m 5 -o /dev/null -w 'HTTP %{http_code}' --resolve '${PG_DOMAIN}:443:${PG_IP}' 'https://${PG_DOMAIN}/health' 2>&1" \
+       2>&1 || true)"
+if [[ "$out" == *"HTTP 200"* ]]; then
+  ok "  [클러스터 → PG] ${PG_IP}:443 (${PG_DOMAIN}) 응답 OK"
+else
+  warn "  [클러스터 → PG] ${PG_IP}:443 실패: $(printf '%s' "$out" | tr '\n' ' ')"
+  warn "      → 택배사 호스트 nginx 를 새 설정으로 다시 띄웠는지 (./courier-ext/run.sh up), pg.crt 가 있는지 (./demo.sh certs)"
+  fail=1
+fi
+
+info "6) 인증서"
+[[ -f "$ROOT/courier-ext/certs/pg.crt" ]] && ok "  courier-ext/certs/pg.crt 있음" \
+  || { warn "  courier-ext/certs/pg.crt 없음 — './demo.sh certs' 후 './courier-ext/run.sh up' 으로 nginx 재기동"; fail=1; }
 if [[ -f "$ROOT/courier-ext/certs/ca.crt" ]]; then ok "  courier-ext/certs/ca.crt 있음"
 else warn "  courier-ext/certs/ca.crt 없음 — './demo.sh certs' 필요 (없으면 배포가 중단됩니다)"; fail=1; fi
 

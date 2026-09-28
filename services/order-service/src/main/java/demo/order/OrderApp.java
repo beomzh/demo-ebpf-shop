@@ -3,16 +3,26 @@ package demo.order;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManagerFactory;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.KeyStore;
+import java.security.Security;
+import java.security.cert.CertificateFactory;
 import java.time.Duration;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
@@ -24,7 +34,7 @@ import java.util.regex.Pattern;
 /**
  * 주문 서비스 (Java) — 게이트웨이가 호출하고, 주문 처리를 위해 여러 서비스를 차례로 호출한다.
  *
- *   POST /orders                 회원 확인 → 재고 차감 → 결제(→회원) → 알림(→회원)
+ *   POST /orders                 회원 확인 → 재고 차감 → PG 카드 혜택 조회(외부, 선택) → 결제(→회원→PG 승인) → 알림(→회원)
  *   GET  /orders/{id}/delivery   배송 서비스 호출 (배송 조회 — 데모 사건 경로)
  *
  * 받은 X-Request-Id 를 모든 하위 호출에 그대로 넘긴다.
@@ -44,6 +54,9 @@ public class OrderApp {
     private static final String NOTIFICATION_URL = env("NOTIFICATION_URL", "http://notification-service:8080");
     private static final String DELIVERY_URL = env("DELIVERY_URL", "http://delivery-service:8080");
     private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(3);
+    // 결제는 안에서 외부 PG 를 부르고, 주 DNS 장애 시 조회가 2초 더 걸리므로 넉넉히
+    private static final Duration PAYMENT_TIMEOUT = Duration.ofSeconds(6);
+    private static final String PG_BENEFITS_URL = "https://" + CorpDnsResolverProvider.PG_DOMAIN + "/v1/card-benefits";
     private static final Duration DELIVERY_TIMEOUT = Duration.ofSeconds(Long.parseLong(env("DELIVERY_TIMEOUT_SECONDS", "10")));
 
     private static final Pattern DELIVERY_PATH = Pattern.compile("^/orders/(\\d+)/delivery$");
@@ -64,8 +77,14 @@ public class OrderApp {
         boolean is(int expected) { return error == null && status == expected; }
     }
 
+    // 외부 PG 호출용 (데모 CA 로 PG 서버 인증서를 검증)
+    private static final HttpClient PG_HTTP = pgClient();
+
     public static void main(String[] args) throws IOException {
         System.setProperty("java.util.logging.SimpleFormatter.format", "%1$tFT%1$tT %4$s order-service %5$s%6$s%n");
+        // JDK DNS 캐시를 짧게: 사내 DNS 변화(레코드 삭제·주 DNS 장애)가 곧바로 드러나게 한다
+        Security.setProperty("networkaddress.cache.ttl", "2");
+        Security.setProperty("networkaddress.cache.negative.ttl", "0");
         int port = Integer.parseInt(env("PORT", "8080"));
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/health", ex -> send(ex, 200, "{\"status\":\"UP\"}"));
@@ -113,12 +132,16 @@ public class OrderApp {
                 DEFAULT_TIMEOUT, "{\"qty\":" + qty + "}");
         if (!stock.is(200)) { fail(ex, reqId, stock, "orderId=" + orderId); return; }
 
-        // 3) 결제 (결제 → 회원)
-        Upstream payment = call("payment-service", "POST", PAYMENT_URL + "/payments", reqId, DEFAULT_TIMEOUT,
+        // 3) PG 카드 혜택 조회 (외부 PG사, 사내 DNS 로 도메인 조회). 선택 기능 — 실패해도 혜택 없이 진행
+        Upstream benefits = pgCardBenefits(reqId);
+        if (!benefits.is(200)) logFailure(reqId, benefits, "orderId=" + orderId + " (카드 혜택 없이 진행)");
+
+        // 4) 결제 (결제 → 회원, 결제 → 외부 PG 승인)
+        Upstream payment = call("payment-service", "POST", PAYMENT_URL + "/payments", reqId, PAYMENT_TIMEOUT,
                 "{\"orderId\":" + orderId + ",\"memberId\":" + memberId + ",\"amount\":" + amount + "}");
         if (!payment.is(201)) { fail(ex, reqId, payment, "orderId=" + orderId); return; }
 
-        // 4) 알림 (알림 → 회원). 알림 실패는 로그만 남기고 주문은 성공시킨다
+        // 5) 알림 (알림 → 회원). 알림 실패는 로그만 남기고 주문은 성공시킨다
         Upstream noti = call("notification-service", "POST", NOTIFICATION_URL + "/notifications", reqId, DEFAULT_TIMEOUT,
                 "{\"orderId\":" + orderId + ",\"memberId\":" + memberId + "}");
         if (!noti.is(202)) logFailure(reqId, noti, "orderId=" + orderId + " (주문은 계속 진행)");
@@ -135,6 +158,58 @@ public class OrderApp {
             return;
         }
         fail(ex, reqId, delivery, "orderId=" + orderId);
+    }
+
+    /**
+     * 외부 PG 카드 혜택 조회. 먼저 PG 도메인을 사내 DNS 로 조회하고(CorpDnsResolverProvider),
+     * 주 DNS 가 실패해 보조 DNS 로 넘어갔으면 그 과정을 WARN 으로 남긴다.
+     * DNS 실패는 java.net.UnknownHostException 으로 Upstream.error 에 담긴다.
+     */
+    private static Upstream pgCardBenefits(String reqId) throws InterruptedException {
+        String target = "pg(" + CorpDnsResolverProvider.PG_DOMAIN + ")";
+        long started = System.nanoTime();
+        CorpDnsResolverProvider.ATTEMPTS.remove();
+        try {
+            InetAddress.getByName(CorpDnsResolverProvider.PG_DOMAIN);   // 사내 DNS 조회 (JDK 캐시 2초)
+        } catch (IOException e) {
+            return new Upstream(target, "GET", PG_BENEFITS_URL, 0, "", (System.nanoTime() - started) / 1_000_000, e);
+        } finally {
+            List<String> attempts = CorpDnsResolverProvider.ATTEMPTS.get();
+            if (attempts != null && attempts.size() > 1 && !attempts.get(attempts.size() - 1).contains("NXDOMAIN")) {
+                log.warning("dns fallback req=" + reqId + " host=" + CorpDnsResolverProvider.PG_DOMAIN
+                        + " attempts=\"" + String.join(" | ", attempts) + "\"");
+            }
+            CorpDnsResolverProvider.ATTEMPTS.remove();
+        }
+        try {
+            HttpResponse<String> r = PG_HTTP.send(HttpRequest.newBuilder(URI.create(PG_BENEFITS_URL))
+                    .timeout(DEFAULT_TIMEOUT).header("X-Request-Id", reqId).GET().build(), HttpResponse.BodyHandlers.ofString());
+            return new Upstream(target, "GET", PG_BENEFITS_URL, r.statusCode(), r.body(), (System.nanoTime() - started) / 1_000_000, null);
+        } catch (IOException e) {
+            return new Upstream(target, "GET", PG_BENEFITS_URL, 0, "", (System.nanoTime() - started) / 1_000_000, e);
+        }
+    }
+
+    private static HttpClient pgClient() {
+        HttpClient.Builder b = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).connectTimeout(Duration.ofSeconds(2));
+        Path ca = Path.of(env("PG_CA_FILE", "/etc/demo-ca/ca.crt"));
+        if (Files.isReadable(ca)) {
+            try (FileInputStream in = new FileInputStream(ca.toFile())) {
+                KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType());
+                ks.load(null, null);
+                ks.setCertificateEntry("demo-ca", CertificateFactory.getInstance("X.509").generateCertificate(in));
+                TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+                tmf.init(ks);
+                SSLContext ctx = SSLContext.getInstance("TLS");
+                ctx.init(null, tmf.getTrustManagers(), null);
+                b.sslContext(ctx);
+            } catch (Exception e) {
+                log.warning("PG CA load failed file=" + ca + " err=" + e);
+            }
+        } else {
+            log.warning("PG CA file not found (" + ca + ") — using JDK default trust store");
+        }
+        return b.build();
     }
 
     /** 하위 서비스 호출. 예외를 던지지 않고 결과(Upstream)로 돌려준다. */
@@ -177,7 +252,7 @@ public class OrderApp {
     /** "order-service → <target>[상태]" 뒤에 하위 서비스가 보낸 errorPath 를 이어 붙인다. */
     private static String errorPath(Upstream u) {
         if (u.error() != null) {
-            return SERVICE + " → " + u.target() + " [" + u.error().getClass().getSimpleName()
+            return SERVICE + " → " + u.target() + " [" + u.error().getClass().getName()
                     + (u.error().getMessage() == null ? "" : ": " + u.error().getMessage()) + " after " + u.ms() + "ms]";
         }
         String head = SERVICE + " → " + u.target() + "[" + u.status() + "]";
