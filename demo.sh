@@ -27,9 +27,9 @@ usage() {
   traffic          부하 발생기 로그 실시간 보기 (Ctrl+C 로 종료)
 
 [추가 시나리오 — 외부 PG사 도메인 DNS 장애]
-  pg-missing       PG 새 도메인이 사내 DNS 에 없음 (NXDOMAIN → UnknownHostException / queryA ENOTFOUND)
+  pg-missing       PG 새 도메인이 사내 DNS 에 없음 → 결제 실패 (결제 서비스 로그: DNS NXDOMAIN)
   pg-register      해결: 사내 DNS 에 새 도메인 등록 → 재시작 없이 회복 (corporate: 등록될 때까지 대기)
-  pg-primary-down  사내 주 DNS 장애 (타임아웃 → 보조 DNS 로 넘어감, 결제 지연)
+  pg-primary-down  사내 주 DNS 장애 (타임아웃 → 보조 DNS 로 넘어감, 결제 약 2초 지연)
   pg-reset         PG 시나리오 복구
   pg-status        사내 DNS 서버별 응답과 체크아웃 1건
   corpdns <명령>   bastion 사내 DNS 조작 (up | down | status | logs | records | record-add [도메인] | record-remove [도메인] | primary-down | primary-up)

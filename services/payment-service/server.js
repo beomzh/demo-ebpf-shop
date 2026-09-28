@@ -79,7 +79,26 @@ function getMember(memberId, reqId) {
   });
 }
 
-// PG 도메인을 사내 DNS 에 주 → 보조 순서로 질의한다. 실패하면 마지막 DNS 에러(err.attempts 포함)를 던진다.
+// Node.js DNS 에러 코드 → DNS 응답 이름 (로그에 NXDOMAIN 등으로 분명히 남기기 위해)
+const DNS_RESULT = {
+  ENOTFOUND: 'NXDOMAIN',     // 그런 이름 없음 (사내 DNS 에 레코드 미등록)
+  ENODATA: 'NODATA',         // 이름은 있지만 A 레코드 없음
+  ESERVFAIL: 'SERVFAIL',     // DNS 서버 내부 오류
+  EREFUSED: 'REFUSED',       // DNS 서버가 질의 거부
+  ETIMEOUT: 'TIMEOUT',       // DNS 서버 응답 없음
+  ECONNREFUSED: 'CONNREFUSED',
+};
+const DNS_MEANING = {
+  NXDOMAIN: '사내 DNS 에 이 도메인 레코드가 없음',
+  NODATA: '사내 DNS 에 이 도메인의 A 레코드가 없음',
+  SERVFAIL: '사내 DNS 서버 오류',
+  REFUSED: '사내 DNS 가 질의를 거부함',
+  TIMEOUT: '사내 DNS 가 응답하지 않음',
+  CONNREFUSED: '사내 DNS 포트가 닫혀 있음',
+};
+const dnsResult = (err) => DNS_RESULT[err.code] || err.code;
+
+// PG 도메인을 사내 DNS 에 주 → 보조 순서로 질의한다. 실패하면 마지막 DNS 에러(err.attempts, err.dnsResult 포함)를 던진다.
 async function resolvePg(host) {
   if (PG_DNS_SERVERS.length === 0) {
     const { address } = await dns.promises.lookup(host, { family: 4 });   // OS 리졸버
@@ -97,12 +116,14 @@ async function resolvePg(host) {
       attempts.push(`${who} → ${ip} (${Date.now() - started}ms)`);
       return { ip, attempts };
     } catch (err) {
-      attempts.push(`${who} → ${err.code} (${Date.now() - started}ms)`);
+      attempts.push(`${who} → ${dnsResult(err)} (${err.code}, ${Date.now() - started}ms)`);
       lastErr = err;
+      lastErr.server = who;
       if (err.code === 'ENOTFOUND' || err.code === 'ENODATA') break;   // NXDOMAIN: 확정 응답 → 보조로 넘어가지 않음
     }
   }
   lastErr.attempts = attempts;
+  lastErr.dnsResult = dnsResult(lastErr);
   throw lastErr;
 }
 
@@ -113,7 +134,12 @@ async function approveAtPg(payload, reqId) {
   try {
     resolved = await resolvePg(PG_DOMAIN);
   } catch (err) {
-    return { status: 0, body: '', ms: Date.now() - started, error: `${err.message}`, stack: err.stack, attempts: err.attempts || [] };
+    const result = err.dnsResult || dnsResult(err);
+    return {
+      status: 0, body: '', ms: Date.now() - started, stack: err.stack, attempts: err.attempts || [],
+      dns: { result, server: err.server || 'system resolver', meaning: DNS_MEANING[result] || err.message },
+      error: `DNS ${result}: ${PG_DOMAIN} (${err.message})`,
+    };
   }
   return new Promise((resolve) => {
     const body = JSON.stringify(payload);
@@ -177,6 +203,10 @@ const server = http.createServer(async (req, res) => {
     }
     if (pg.status !== 200) {
       const url = `https://${PG_DOMAIN}/v1/payments/approve`;
+      if (pg.dns) {
+        // 원인 한 줄: 어느 DNS 가 무엇이라고 답했는지
+        log('ERROR', `dns lookup failed req=${reqId} host=${PG_DOMAIN} result=${pg.dns.result} server="${pg.dns.server}" — ${pg.dns.meaning}`);
+      }
       const dnsInfo = pg.attempts.length ? ` dns="${pg.attempts.join(' | ')}"` : '';
       const path = pg.status === 0
         ? `${SERVICE} → ${target} [${pg.error}${dnsInfo ? ' —' + dnsInfo.replace(/^ dns=/, ' ').replace(/"/g, '') : ''}]`

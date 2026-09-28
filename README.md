@@ -44,7 +44,7 @@ eBPF 가 가장 잘 보여줄 수 있는 사건입니다. 화면에 나오는 �
 | 회원 `member-service` | Java 21 | 게이트웨이, 주문, 결제, 알림 | MySQL |
 | 상품 `product-service` | Go 1.22 | 게이트웨이 | 재고 |
 | 재고 `inventory-service` | Ruby 3.3 | 상품, 주문 | Redis |
-| 주문 `order-service` | Java 21 | 게이트웨이 | 회원, 재고, **외부 PG사**(카드 혜택 조회), 결제, 알림, 배송 |
+| 주문 `order-service` | Java 21 | 게이트웨이 | 회원, 재고, 결제, 알림, 배송 |
 | 결제 `payment-service` | Node.js 20 | 주문 | 회원 (VIP 할인 확인), **외부 PG사**(승인) |
 | 알림 `notification-service` | PHP 8.3 | 주문 | 회원 (연락처·등급 확인) |
 | 배송 `delivery-service` | Python 3.12 | 주문 | 외부 택배사 API (HTTPS). **모니터링 없음** |
@@ -103,9 +103,7 @@ flowchart LR
   ORD --> MEM
   ORD --> INV
   ORD --> PAY --> MEM
-  ORD -.->|"PG 카드 혜택 (HTTPS)"| OLD
   PAY -.->|"PG 승인 (HTTPS)"| OLD
-  ORD -.->|"PG 도메인 조회"| P1
   PAY -.->|"PG 도메인 조회"| P1
   P1 -.->|"실패 시"| P2
   ORD --> NOTI --> MEM
@@ -122,13 +120,13 @@ loadgen 은 사용자 역할이라 게이트웨이만 호출합니다. 게이트
 
 | 사용자 요청 | 호출 경로 | 깊이 |
 | --- | --- | --- |
-| 체크아웃 `POST /api/checkout` | 게이트웨이 → 상품 → 재고 → Redis<br/>게이트웨이 → 주문 → 회원 → MySQL<br/>　　　　　　　　 → 재고 → Redis<br/>　　　　　　　　 → **외부 PG사** (카드 혜택, 사내 DNS 로 조회)<br/>　　　　　　　　 → 결제 → 회원 → MySQL<br/>　　　　　　　　　　　 → **외부 PG사** (승인, 사내 DNS 로 조회)<br/>　　　　　　　　 → 알림 → 회원 → MySQL | 최대 5 |
+| 체크아웃 `POST /api/checkout` | 게이트웨이 → 상품 → 재고 → Redis<br/>게이트웨이 → 주문 → 회원 → MySQL<br/>　　　　　　　　 → 재고 → Redis<br/>　　　　　　　　 → 결제 → 회원 → MySQL<br/>　　　　　　　　　　　 → **외부 PG사** (승인, 사내 DNS 로 조회)<br/>　　　　　　　　 → 알림 → 회원 → MySQL | 최대 5 |
 | 배송 조회 `GET /api/orders/{id}/tracking` | 게이트웨이 → 주문 → 배송 → **외부 택배사 (HTTPS)** ← 데모 사건 경로 | 4 |
 | 상품 보기 `GET /api/products/{id}` | 게이트웨이 → 상품 → 재고 → Redis | 4 |
 | 회원 보기 `GET /api/members/{id}` | 게이트웨이 → 회원 → MySQL | 3 |
 
-- 체크아웃 한 번에 서비스 간 HTTP 호출 8번 + 외부 PG 호출 2번 + DB 쿼리가 일어나, 연결선과 호출 수가 풍부하게 쌓입니다.
-- 프로토콜도 여러 가지입니다: HTTP(서비스 간), MySQL, Redis(RESP), DNS(클러스터 DNS·사내 DNS), HTTPS(배송 → 택배사, 주문·결제 → PG사).
+- 체크아웃 한 번에 서비스 간 HTTP 호출 8번 + 외부 PG 호출 1번 + DB 쿼리가 일어나, 연결선과 호출 수가 풍부하게 쌓입니다.
+- 프로토콜도 여러 가지입니다: HTTP(서비스 간), MySQL, Redis(RESP), DNS(클러스터 DNS·사내 DNS), HTTPS(배송 → 택배사, 결제 → PG사).
 
 ### 애플리케이션 로그로 실패 지점 찾기
 
@@ -261,7 +259,7 @@ for d in gateway-service order-service delivery-service; do echo "== $d"; oc -n 
 
 ### 사내 DNS (추가 시나리오용)
 
-주문·결제 서비스는 PG 도메인을 **사내 DNS(주·보조)** 에 직접 물어봅니다. 두 가지 중 하나로 준비합니다 (`CORP_DNS_MODE`).
+결제 서비스는 PG 도메인을 **사내 DNS(주·보조)** 에 직접 물어봅니다. 두 가지 중 하나로 준비합니다 (`CORP_DNS_MODE`).
 
 | 모드 | 사내 DNS | 시나리오 재현 방법 | 준비 |
 | --- | --- | --- | --- |
@@ -714,9 +712,9 @@ dig @10.0.0.100 api-new.pg.example | grep status   # NXDOMAIN
 
 | 시연 | 스크립트 (DNS 는 그대로) | 실제 DNS 조작 (B 구성일 때) | 앱 로그 |
 | --- | --- | --- | --- |
-| 레코드 없음 (사건) | `./demo.sh pg-missing` — 주문·결제의 PG 도메인을 `PG_UNREGISTERED_DOMAIN` 으로 교체 | 주 DNS 존 파일에서 `api` 줄 삭제 + **SOA 시리얼 증가** → `sudo rndc reload` (보조에도 자동 반영) | `java.net.UnknownHostException … NXDOMAIN` / `queryA ENOTFOUND` |
+| 레코드 없음 (사건) | `./demo.sh pg-missing` — 결제 서비스의 PG 도메인을 `PG_UNREGISTERED_DOMAIN` 으로 교체 | 주 DNS 존 파일에서 `api` 줄 삭제 + **SOA 시리얼 증가** → `sudo rndc reload` (보조에도 자동 반영) | 결제 서비스 `dns lookup failed … result=NXDOMAIN` |
 | 등록 (해결) | `./demo.sh pg-register` — 주·보조 모두에서 조회될 때까지 기다렸다가 회복 확인 | 주 DNS 존 파일에 `api-new  IN A  <PG_IP>` 추가 + 시리얼 증가 → `sudo rndc reload` (`pg-register` 를 먼저 띄워 두면 등록 순간 자동 감지) | 에러 로그가 멈추고 체크아웃 201 |
-| 주 DNS 장애 | `./demo.sh pg-primary-down` — 주 DNS 로 가는 패킷 차단 → **2초 타임아웃 후 보조** | 주 DNS 에서 `sudo systemctl stop named` → **즉시 연결 거부 후 보조** | `dns fallback … primary → ETIMEOUT`(또는 `ECONNREFUSED`) `\| secondary → IP` |
+| 주 DNS 장애 | `./demo.sh pg-primary-down` — 결제 → 주 DNS 패킷 차단 → **2초 타임아웃 후 보조** | 주 DNS 에서 `sudo systemctl stop named` → **즉시 연결 거부 후 보조** | 결제 서비스 `dns fallback … primary → TIMEOUT`(또는 `CONNREFUSED`) `\| secondary → IP` |
 | 복구 | `./demo.sh pg-reset` | 레코드 복구 + 시리얼 증가 + `rndc reload` / `sudo systemctl start named` | — |
 
 - 레코드를 고칠 때마다 SOA **시리얼을 올려야** 보조 DNS 로 복제됩니다 (`2026092801` → `2026092802` …).
@@ -903,87 +901,155 @@ oc scale deploy/loadgen -n demo-infra --replicas=3
 
 ### 6-2. 추가 시나리오 — 외부 PG 도메인 DNS 장애
 
-체크아웃 중 **주문 서비스(Java)** 는 PG사 카드 혜택 조회, **결제 서비스(Node.js)** 는 PG사 승인을 호출합니다.
-두 서비스 모두 PG 도메인을 클러스터 DNS 가 아닌 **사내 DNS 에 주 → 보조 순서로 직접 질의**합니다.
+#### 무대: 외부 PG사(nginx)와 사내 DNS 2대
 
-- 주 DNS 가 응답하지 않으면(타임아웃·거부) 보조 DNS 로 넘어갑니다.
-- **NXDOMAIN 은 "그런 이름은 없다"는 확정 응답이라 보조 DNS 로 넘어가지 않고** 바로 실패합니다 (OS 리졸버와 같은 동작).
-- 카드 혜택 조회는 선택 기능이라 실패해도 주문은 계속되고, 결제 승인이 실패하면 체크아웃이 실패합니다.
-  그래서 같은 DNS 장애가 **Java 와 Node.js 로그에 각각 어떻게 찍히는지** 한 번에 볼 수 있습니다.
+```mermaid
+flowchart LR
+  subgraph k8s["클러스터 (demo-shop)"]
+    GW["게이트웨이<br/>C#"] --> ORD["주문<br/>Java"] --> PAY["결제<br/>Node.js"]
+  end
+  subgraph corp["사내 DNS (클러스터 밖)"]
+    D1["주 DNS"]
+    D2["보조 DNS"]
+  end
+  subgraph ext["외부 PG사 (클러스터 밖, nginx)"]
+    PG["https://api.pg.example<br/>/v1/payments/approve"]
+  end
+  PAY -->|"① PG 도메인 조회"| D1
+  D1 -.->|"응답 없을 때만"| D2
+  PAY -->|"② 승인 요청 (HTTPS)"| PG
+```
 
-**사건 → 원인 확인 → 해결** 순서로 시연합니다 (택배사 시나리오의 `incident → firewall → fix` 와 같은 흐름).
+| 구성 요소 | 역할 | 실체 |
+| --- | --- | --- |
+| **결제 서비스** (Node.js) | 체크아웃 때 외부 PG사에 **승인**을 요청. **외부 PG 를 부르는 유일한 서비스** | `demo-shop/payment-service` |
+| **외부 PG사** | 결제 승인 API (`POST /v1/payments/approve`) | 외부 API 호스트의 nginx — 택배사 API 와 같은 nginx 가 TLS SNI 로 구분해 응답. PG 도메인은 `PG_IP`(기본: 택배사 예전 IP)를 가리킴 |
+| **사내 주 DNS** | PG 도메인을 `PG_IP` 로 답함. 결제 서비스가 **먼저** 묻는 서버 | bastion 모드: bastion 의 CoreDNS 컨테이너 / corporate 모드: 실제 사내 DNS (예: BIND master) |
+| **사내 보조 DNS** | 주 DNS 가 **응답하지 않을 때만** 묻는 서버 | bastion 모드: CoreDNS 컨테이너 / corporate 모드: 실제 사내 DNS (예: BIND slave) |
 
-> **이야기**: PG사가 API 도메인을 `api.pg.example` → `api-new.pg.example` 로 옮긴다고 공지했고, 개발팀은 새 도메인으로 설정을 바꿔 배포했다.
-> 그런데 사내 DNS 에 새 도메인 등록이 누락돼 결제가 전부 실패한다. 사내 DNS 에 등록하자 앱 재시작 없이 바로 회복된다.
+- 결제 서비스는 PG 도메인을 클러스터 DNS 가 아니라 **사내 DNS 에 직접**, 주 → 보조 순서로 묻습니다 (요청마다 새로 조회).
+- 주 DNS 가 **"그런 이름 없음"(NXDOMAIN)** 이라고 답하면 확정 답이라 보조로 넘어가지 않습니다. 주 DNS 가 **응답이 없을 때(타임아웃)** 만 보조로 넘어갑니다 — OS 리졸버와 같은 동작.
+- 주문·배송 등 다른 서비스는 PG·사내 DNS 를 쓰지 않으므로, 이 시나리오의 장애는 **결제 서비스에서만** 납니다 (주문은 결제의 실패를 위로 전달할 뿐).
+
+#### 이야기
+
+> PG사가 API 도메인을 `api.pg.example` → `api-new.pg.example` 로 옮긴다고 공지했고, 결제팀은 새 도메인으로 설정을 바꿔 배포했다.
+> 그런데 **사내 DNS 에 새 도메인 등록이 누락**돼 결제가 전부 실패한다. 코드 문제가 아니라 DNS 문제다.
+> 사내 DNS 에 새 도메인을 등록하자 **앱 재시작 없이** 바로 회복된다.
 
 | 명령 | 단계 | bastion 모드에서 하는 일 | corporate 모드에서 하는 일 | 사용자 결과 |
 | --- | --- | --- | --- | --- |
-| `./demo.sh pg-missing` | 사건 | 주문·결제의 PG 도메인을 `PG_UNREGISTERED_DOMAIN` 으로 교체(재시작) + 데모 사내 DNS 에 그 레코드가 없게 | 주문·결제의 PG 도메인을 `PG_UNREGISTERED_DOMAIN` 으로 교체(재시작) — 사내 DNS 에 없는 이름 | 체크아웃 **502**, 즉시 |
-| `./demo.sh pg-register` | **해결** | 데모 사내 DNS 에 새 도메인 A 레코드 등록 | 등록할 레코드를 안내하고, **주·보조 DNS 모두에서 조회될 때까지 기다림** (담당자가 등록하는 순간이 시연 장면) | **앱 재시작 없이** 체크아웃 201 로 회복 |
-| `./demo.sh pg-primary-down` | 별도 사건 | 주 DNS 컨테이너 일시정지 (안 되면 nftables 로 53 drop) | 주문·결제 → 주 DNS 패킷 drop (NetworkPolicy) | 체크아웃 **201**, 약 4초로 느려짐 |
+| `./demo.sh pg-status` | 정상 확인 | 서버별 조회 결과 + 체크아웃 1건 | 〃 | 주·보조 모두 PG IP, 체크아웃 201 |
+| `./demo.sh pg-missing` | 사건 | 결제 서비스의 PG 도메인을 `PG_UNREGISTERED_DOMAIN` 으로 교체(재시작) + 데모 사내 DNS 에 그 레코드가 없게 | 결제 서비스의 PG 도메인을 `PG_UNREGISTERED_DOMAIN` 으로 교체(재시작) — 사내 DNS 에 없는 이름 | 체크아웃 **502**, 즉시 |
+| `./demo.sh pg-register` | **해결** | 데모 사내 DNS 에 새 도메인 A 레코드 등록 | 등록할 레코드를 안내하고 **주·보조 모두에서 조회될 때까지 기다림** (담당자가 등록하는 순간이 시연 장면) | **앱 재시작 없이** 체크아웃 201 |
 | `./demo.sh pg-reset` | 되돌리기 | 원래 도메인으로, 새 도메인 레코드 삭제, 주 DNS 재개 | 원래 도메인으로, 차단 정책 삭제 (사내 DNS 에 새 도메인이 남아 있으면 알려 줌) | 체크아웃 201 |
-| `./demo.sh pg-status` | 확인 | 서버별 조회 결과 + 체크아웃 1건 + 실패 경로 | 〃 | |
+| `./demo.sh pg-primary-down` | 별도 사건 | 주 DNS 컨테이너 일시정지 (안 되면 nftables 로 53 drop) | 결제 → 주 DNS 패킷 drop (NetworkPolicy) | 체크아웃 **201**, 약 2초 느려짐 |
 
-- 앱은 PG 도메인을 매번 사내 DNS 에 묻고(Java 는 캐시 2초, 없는 이름은 캐시 안 함) PG 인증서에 새 도메인도 들어 있어서, **DNS 등록만으로 회복됩니다** (로컬에서 컨테이너 재시작 없이 502 → 201 확인).
-- corporate 모드에서 `pg-register` 는 사내 DNS 를 바꾸지 않습니다. 다음 테이크에서 `pg-missing` 을 다시 하려면 사내 DNS 에서 새 도메인 레코드를 지워야 합니다 (`pg-reset` 이 남아 있는지 알려 줌).
+#### 1) 정상 상태
 
-택배사 시나리오(`incident`)와 독립적이라 함께 켜도 되지만, 화면이 섞이지 않게 하나씩 촬영하는 것을 권장합니다.
-
-#### 레코드 없음 (`pg-missing`) — 애플리케이션 로그
-
-주문(Java) — 카드 혜택 없이 진행:
 ```
-SEVERE order-service upstream call failed req=lg-… target=pg(api.pg.example) call="GET https://api.pg.example/v1/card-benefits" status=0 elapsedMs=3 orderId=1006 (카드 혜택 없이 진행)
-       path="order-service → pg(api.pg.example) [java.net.UnknownHostException: api.pg.example: Name or service not known (NXDOMAIN from primary 10.0.0.63) after 3ms]"
-java.net.UnknownHostException: api.pg.example: Name or service not known (NXDOMAIN from primary 10.0.0.63)
-	at demo.order.CorpDnsResolverProvider.lookupViaCorpDns(CorpDnsResolverProvider.java:81)
-	at java.base/java.net.InetAddress.getAllByName(Unknown Source)
-	at java.base/java.net.InetAddress.getByName(Unknown Source)
-	at demo.order.OrderApp.pgCardBenefits(OrderApp.java:173)
-	...
-Caused by: javax.naming.NameNotFoundException: DNS name not found [response code 3]; remaining name 'api.pg.example'
+$ ./demo.sh pg-status
+  primary   10.0.0.63  api.pg.example → 10.0.0.61 (1ms)
+  secondary 10.0.0.64  api.pg.example → 10.0.0.61 (1ms)
+  HTTP 201 0.2s
 ```
 
-결제(Node.js) — 승인 실패 → 체크아웃 실패:
+`./demo.sh traffic` 에서 `POST /api/checkout` 이 모두 `201`, 결제 서비스 로그에 에러 없음.
+
+#### 2) 사건 — `./demo.sh pg-missing`
+
+결제 서비스가 `api-new.pg.example` 로 재시작되고(30초 안팎), 체크아웃만 **즉시 502** 가 됩니다. 배송 조회·상품·회원 조회는 정상입니다.
+
 ```
-ERROR payment-service upstream call failed req=lg-… target=pg(api.pg.example) call="POST https://api.pg.example/v1/payments/approve" status=0 elapsedMs=1 orderId=1006
-      dns="primary 10.0.0.63 → ENOTFOUND (0ms)" path="payment-service → pg(api.pg.example) [queryA ENOTFOUND api.pg.example — primary 10.0.0.63 → ENOTFOUND (0ms)]"
-Error: queryA ENOTFOUND api.pg.example
+$ ./demo.sh pg-status
+  primary   10.0.0.63  api-new.pg.example → NXDOMAIN (ENOTFOUND, 1ms)
+  secondary 10.0.0.64  api-new.pg.example → NXDOMAIN (ENOTFOUND, 1ms)
+  HTTP 502 0.06s
+  실패 경로: gateway-service → order-service[502] → payment-service[504] → pg(api-new.pg.example) [DNS NXDOMAIN: api-new.pg.example (queryA ENOTFOUND api-new.pg.example) — primary 10.0.0.63 → NXDOMAIN (ENOTFOUND, 1ms)]
+```
+
+#### 3) 원인 확인 — 어디를 보나
+
+**① eBPF 화면 (먼저)**
+- 게이트웨이 → 주문 → 결제 구간의 **오류율 상승**
+- **결제 서비스** 상세 → **DNS 탭**: `api-new.pg.example` 조회의 **NXDOMAIN 증가**, 질의 목적지는 사내 DNS IP
+- 결론: 코드가 아니라 "그런 도메인이 없다"는 DNS 응답이 원인
+
+**② 결제 서비스 로그 (Node.js) — 집중해서 볼 곳**
+
+```bash
+kubectl -n demo-shop logs deploy/payment-service --since=1m | grep -A3 "dns lookup failed" | tail -5
+```
+
+```
+ERROR payment-service dns lookup failed req=lg-… host=api-new.pg.example result=NXDOMAIN server="primary 10.0.0.63" — 사내 DNS 에 이 도메인 레코드가 없음
+ERROR payment-service upstream call failed req=lg-… target=pg(api-new.pg.example) call="POST https://api-new.pg.example/v1/payments/approve" status=0 elapsedMs=2 orderId=1006
+      dns="primary 10.0.0.63 → NXDOMAIN (ENOTFOUND, 1ms)" path="payment-service → pg(api-new.pg.example) [DNS NXDOMAIN: …]"
+Error: queryA ENOTFOUND api-new.pg.example
     at QueryReqWrap.onresolve [as oncomplete] (node:internal/dns/promises:292:17)
 ```
 
-게이트웨이 — 실패 경로 한 줄:
-```
-path="gateway-service → order-service[502] → payment-service[504] → pg(api.pg.example) [queryA ENOTFOUND api.pg.example — primary 10.0.0.63 → ENOTFOUND (0ms)]"
+- 첫 줄이 원인입니다: **어느 도메인을, 어느 DNS 에 물었고, NXDOMAIN 이라는 답을 받았다.**
+- 보조 DNS 로 넘어가지 않은 것이 정상입니다 (NXDOMAIN 은 확정 답).
+
+**③ 게이트웨이 로그 (C#)** — 한 줄에 사용자 → 주문 → 결제 → PG 전체 경로:
+
+```bash
+kubectl -n demo-shop logs deploy/gateway-service --since=1m | grep "step=order" | tail -1
 ```
 
-#### 주 DNS 장애 (`pg-primary-down`) — 애플리케이션 로그
+주문 서비스(Java)는 결제의 실패를 `payment-service[504]` 로 전달만 합니다 (PG·DNS 를 직접 쓰지 않음).
 
-주 DNS 가 2초 안에 답하지 않아 보조 DNS 로 넘어가고, 요청은 성공하지만 느려집니다:
+#### 4) 해결 — `./demo.sh pg-register`
+
+- **bastion 모드**: 데모 사내 DNS 에 `api-new.pg.example → PG_IP` 가 등록되고, 곧바로 회복을 확인합니다.
+- **corporate 모드**: `pg-register` 를 먼저 띄워 두면 등록할 레코드를 안내하고 기다립니다. 주 DNS 에 레코드를 추가하면(아래) 주·보조 모두 조회되는 순간 회복을 확인합니다.
+
+  ```
+  # 주 DNS(BIND master) 존 파일에 추가 + SOA 시리얼 +1
+  api-new    IN A    10.0.0.61
+  $ sudo named-checkzone pg.example /var/named/pg.example.zone && sudo rndc reload
+  # 보조 DNS(slave)는 NOTIFY 로 자동 복제 (바로 보려면 보조에서 sudo rndc retransfer pg.example)
+  ```
+
 ```
-WARNING order-service dns fallback req=lg-… host=api.pg.example attempts="primary 10.0.0.63 → SocketTimeoutException (2002ms) | secondary 10.0.0.64 → 10.0.0.61 (2ms)"
-WARN payment-service dns fallback req=lg-… host=api.pg.example attempts="primary 10.0.0.63 → ETIMEOUT (2003ms) | secondary 10.0.0.64 → 10.0.0.61 (2ms)"
+주·보조 사내 DNS 모두 api-new.pg.example → 10.0.0.61 조회됨 — 앱 재시작 없이 다음 요청부터 회복됩니다
+  HTTP 201 0.09s
 ```
 
-주·보조 둘 다 응답하지 않으면(참고: 보조까지 멈추려면 bastion 에서 `sudo podman pause corp-dns-secondary`):
+결제 서비스는 요청마다 사내 DNS 에 새로 묻고, PG 인증서에 새 도메인도 들어 있어서 **등록만으로 회복**합니다 (로컬에서 재시작 없이 502 → 201 확인).
+eBPF DNS 탭에서도 NXDOMAIN 이 멈추고 NOERROR 로 바뀝니다.
+
+#### 5) 다음 테이크 준비 — `./demo.sh pg-reset`
+
+- 결제 서비스를 원래 도메인으로 돌립니다. bastion 모드는 새 도메인 레코드도 지웁니다.
+- corporate 모드는 사내 DNS 의 `api-new` 레코드를 **직접 지워야**(시리얼 +1, `rndc reload`) 다음 `pg-missing` 에서 다시 NXDOMAIN 이 납니다. 남아 있으면 `pg-reset` 이 알려 줍니다.
+
+#### 별도 사건: 주 DNS 장애 — `./demo.sh pg-primary-down`
+
+주 DNS 가 응답하지 않으면 결제 서비스가 2초 기다린 뒤 보조 DNS 로 넘어갑니다. 결제는 성공하지만 **약 2초 느려집니다.**
+
 ```
-java.net.UnknownHostException: api.pg.example: Temporary failure in name resolution (primary 10.0.0.63 → SocketTimeoutException (2003ms), secondary 10.0.0.64 → SocketTimeoutException (2006ms))
-Caused by: javax.naming.CommunicationException: DNS error [Root exception is java.net.SocketTimeoutException]; remaining name 'api.pg.example'
+WARN payment-service dns fallback req=lg-… host=api.pg.example attempts="primary 10.0.0.63 → TIMEOUT (ETIMEOUT, 2007ms) | secondary 10.0.0.64 → 10.0.0.61 (2ms)"
+```
+
+주·보조 둘 다 응답하지 않으면 (보조까지 멈추려면 bastion 에서 `sudo podman pause corp-dns-secondary`):
+
+```
+ERROR payment-service dns lookup failed … result=TIMEOUT server="secondary 10.0.0.64" — 사내 DNS 가 응답하지 않음
 Error: queryA ETIMEOUT api.pg.example
 ```
 
-| 상황 | Java (주문) | Node.js (결제) |
+eBPF: 결제 서비스 DNS 탭에서 조회 **지연·타임아웃**, 체크아웃 지연 증가. 복구는 `./demo.sh pg-reset`.
+
+| 상황 | 결제 서비스 로그 `result=` | 사용자 결과 |
 | --- | --- | --- |
-| 레코드 없음 (NXDOMAIN) | `java.net.UnknownHostException: … Name or service not known`<br/>← `javax.naming.NameNotFoundException` | `Error: queryA ENOTFOUND` |
-| 주 DNS 무응답 → 보조 성공 | `dns fallback … SocketTimeoutException (2002ms) \| secondary … → IP` | `dns fallback … ETIMEOUT (2003ms) \| secondary … → IP` |
-| 주·보조 모두 무응답 | `java.net.UnknownHostException: … Temporary failure in name resolution`<br/>← `javax.naming.CommunicationException` ← `java.net.SocketTimeoutException` | `Error: queryA ETIMEOUT` |
+| 레코드 없음 | `NXDOMAIN` — 사내 DNS 에 이 도메인 레코드가 없음 | 502 즉시 |
+| 주 DNS 무응답 → 보조 성공 | (`dns fallback`) `primary → TIMEOUT \| secondary → IP` | 201, +2초 |
+| 주·보조 모두 무응답 | `TIMEOUT` — 사내 DNS 가 응답하지 않음 | 502, 약 4초 |
+| DNS 서버 오류 | `SERVFAIL` / `REFUSED` (보조로 넘어감) | 보조 결과에 따름 |
 
-#### eBPF 화면에서 볼 것
-
-- 주문·결제 서비스 상세 → **DNS 탭**: `api.pg.example` 조회의 **NXDOMAIN 증가**(`pg-missing`), 조회 **지연·타임아웃**(`pg-primary-down`)
-- 주문·결제 → 사내 DNS IP(주·보조) 로 나가는 DNS 질의가 서비스 밖 목적지로 보임
-- 체크아웃 요청(게이트웨이 → 주문 → 결제)의 오류율(`pg-missing`) 또는 지연 증가(`pg-primary-down`)
-- PG 호출 자체는 HTTPS 이고 Java·Node.js 의 TLS 내용은 eBPF 로 볼 수 없으므로(10장), **원인 설명은 DNS 탭 + 애플리케이션 로그**로 합니다
+- PG 호출 자체는 HTTPS 이고 Node.js 의 TLS 내용은 eBPF 로 볼 수 없으므로(10장), **원인 설명은 DNS 탭 + 결제 서비스 로그**로 합니다.
 
 ---
 
@@ -1207,8 +1273,8 @@ oc adm policy add-scc-to-user privileged -z <agent-serviceaccount> -n <agent-nam
 
 | 증상 | 원인 / 조치 |
 | --- | --- |
-| 배포 후 체크아웃이 전부 502, 경로 끝이 `pg(api.pg.example) [queryA ENOTFOUND …]` | 사내 DNS 에 PG 도메인이 없음 — `pg-missing` 을 켜 둔 상태인지(`./demo.sh pg-reset`), bastion 사내 DNS 를 띄웠는지(`sudo ./demo.sh corpdns status`) |
-| 체크아웃이 항상 4초 이상, `dns fallback` WARN 반복 | 주 DNS 가 응답하지 않음 — `pg-primary-down` 상태인지(`./demo.sh pg-reset`), 노드 → 주 DNS 53/udp 가 막혀 있지 않은지 |
+| 배포 후 체크아웃이 전부 502, 경로 끝이 `pg(api.pg.example) [DNS NXDOMAIN …]` | 사내 DNS 에 PG 도메인이 없음 — `pg-missing` 을 켜 둔 상태인지(`./demo.sh pg-reset`), bastion 사내 DNS 를 띄웠는지(`sudo ./demo.sh corpdns status`) |
+| 체크아웃이 항상 2초 이상, 결제 서비스에 `dns fallback` WARN 반복 | 주 DNS 가 응답하지 않음 — `pg-primary-down` 상태인지(`./demo.sh pg-reset`), 노드 → 주 DNS 53/udp 가 막혀 있지 않은지 |
 | 경로 끝이 `pg(…) [… SSLHandshakeException …]` / `unable to verify the first certificate` | PG 인증서를 데모 CA 로 검증하지 못함 — `./demo.sh certs` 후 `sudo ./courier-ext/run.sh up`, `courier-ca` 시크릿이 같은 CA 인지 (`./demo.sh deploy`) |
 | 사내 DNS 에 존을 추가했는데 `dig` 결과가 비어 있음 | named 가 새 설정을 안 읽음 → `sudo rndc reload` (안 되면 `systemctl restart named`), `sudo rndc zonestatus <존>` |
 | 보조 DNS 만 옛 레코드를 답함 | 주 DNS 존의 SOA 시리얼을 안 올렸음 → 시리얼 증가 후 `rndc reload`, 보조에서 `rndc retransfer <존>` |

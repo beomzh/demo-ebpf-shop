@@ -8,8 +8,7 @@
 #                      ├→ member → MySQL
 #                      └→ order ─┬→ member → MySQL
 #                                ├→ inventory → Redis
-#                                ├→ 외부 PG사 (카드 혜택 조회, HTTPS) — PG 도메인은 사내 DNS 로 조회
-#                                ├→ payment → member, 외부 PG사 (승인, HTTPS)
+#                                ├→ payment → member, 외부 PG사 (승인, HTTPS — PG 도메인은 사내 DNS 로 조회)
 #                                ├→ notification → member
 #                                └→ delivery → 외부 택배사 (HTTPS)
 #
@@ -259,9 +258,6 @@ spec:
   template:
     metadata:
       labels: { app: order-service }
-      annotations:
-        # 외부 API(PG) 사설 CA 지문. CA 가 바뀌면 deploy 때 파드가 재시작된다
-        demo.observ/ca-sha256: "__CA_SHA256__"
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -278,10 +274,6 @@ spec:
             - { name: NOTIFICATION_URL, value: "http://notification-service:8080" }
             - { name: DELIVERY_URL, value: "http://delivery-service:8080" }
             - { name: DELIVERY_TIMEOUT_SECONDS, value: "10" }
-            - { name: PG_DOMAIN, value: "__PG_DOMAIN__" }
-            - { name: PG_DNS_SERVERS, value: "__PG_DNS_SERVERS__" }
-            - { name: PG_DNS_TIMEOUT_MS, value: "2000" }
-            - { name: PG_CA_FILE, value: "/etc/demo-ca/ca.crt" }
           ports:
             - containerPort: 8080
           readinessProbe:
@@ -296,12 +288,9 @@ spec:
             limits: { memory: 512Mi }
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
-            - { name: demo-ca, mountPath: /etc/demo-ca, readOnly: true }
       volumes:
         - name: tmp
           emptyDir: {}
-        - name: demo-ca
-          secret: { secretName: courier-ca }
 ---
 apiVersion: v1
 kind: Service

@@ -86,19 +86,20 @@ fw-delivery-default             배송 서비스 egress 기본 규칙: DNS 만 �
 
 ## 추가 시나리오 — 외부 PG 도메인 DNS 장애 (선택)
 
-택배사 사건과 별개로 촬영합니다. 자세한 동작·로그는 [README 6-2](../README.md#6-2-추가-시나리오--외부-pg-도메인-dns-장애).
+택배사 사건과 별개로 촬영합니다. 무대 구성(외부 PG사 nginx, 사내 DNS 주·보조)과 로그 예시는 [README 6-2](../README.md#6-2-추가-시나리오--외부-pg-도메인-dns-장애).
+장애는 **결제 서비스(Node.js)** 에서만 납니다 — 외부 PG 를 부르는 유일한 서비스입니다.
 
 | 순서 | 명령 | 화면 | 보여줄 것 | 말할 것 |
 | --- | --- | --- | --- | --- |
-| 1 | `./demo.sh pg-missing` | 결제·주문 서비스 상세 → DNS 탭 | 새 PG 도메인(`api-new…`) 조회의 NXDOMAIN 증가, 체크아웃 오류율 | PG사 도메인 이전 후 결제가 전부 실패 — 코드가 아니라 사내 DNS 등록 누락 |
-| 2 | (터미널) `kubectl -n demo-shop logs deploy/order-service --since=1m \| grep -A3 "target=pg("` | 애플리케이션 로그 | Java `java.net.UnknownHostException … NXDOMAIN`, Node.js `queryA ENOTFOUND` | eBPF 가 먼저 보여준 원인을 앱 로그가 뒷받침한다 |
-| 3 | `./demo.sh pg-register` (corporate: 담당자가 등록) | DNS 탭, 체크아웃 | NXDOMAIN 이 멈추고 체크아웃 정상 | 사내 DNS 에 등록하자 **앱 재시작 없이** 회복 |
-| 4 | `./demo.sh pg-reset` → `./demo.sh pg-primary-down` | DNS 탭, 체크아웃 지연 | DNS 조회 지연·타임아웃, 체크아웃 약 4초 | 주 DNS 가 죽으면 보조로 넘어가지만 매번 2초씩 기다린다 |
-| 5 | (터미널) `… \| grep "dns fallback"` | 애플리케이션 로그 | `primary … → ETIMEOUT (2003ms) \| secondary … → IP` | 어느 DNS 가 죽었는지까지 로그에 남는다 |
-| 6 | `./demo.sh pg-reset` | | 지연 해소 | |
+| 0 | `./demo.sh pg-status` | | 주·보조 DNS 모두 PG IP, 체크아웃 201 | 결제 서비스는 PG 도메인을 사내 DNS(주·보조)에 물어 외부 PG사에 승인을 요청한다 |
+| 1 | `./demo.sh pg-missing` | 결제 서비스 상세 → DNS 탭, 체크아웃 오류율 | 새 PG 도메인(`api-new…`) 조회의 **NXDOMAIN** 증가 | PG사 도메인 이전 후 결제가 전부 실패 — 코드가 아니라 사내 DNS 등록 누락 |
+| 2 | (터미널) `kubectl -n demo-shop logs deploy/payment-service --since=1m \| grep "dns lookup failed" \| tail -1` | 결제 서비스 로그 | `result=NXDOMAIN server="primary …" — 사내 DNS 에 이 도메인 레코드가 없음` | eBPF 가 먼저 보여준 원인을 앱 로그가 뒷받침한다 |
+| 3 | `./demo.sh pg-register` (corporate: 주 DNS 에 레코드 추가) | DNS 탭, 체크아웃 | NXDOMAIN 멈춤, 체크아웃 201 | 사내 DNS 에 한 줄 등록하자 **앱 재시작 없이** 회복 |
+| 4 | `./demo.sh pg-reset` (corporate: 새 레코드 삭제 후) | | 원래 상태 | 다음 테이크 준비 |
+| (별도) | `./demo.sh pg-primary-down` → `grep "dns fallback"` | DNS 탭 지연, 체크아웃 +2초 | `primary … → TIMEOUT (2007ms) \| secondary … → IP` | 주 DNS 가 죽으면 보조로 넘어가지만 매번 2초씩 기다린다 |
 
-- 촬영 전 `./demo.sh pg-status` 로 주·보조 모두 PG 도메인을 돌려주는지, 체크아웃이 201 인지 확인합니다.
-- PG 호출(HTTPS)의 내용은 Java·Node.js 라 eBPF 로 볼 수 없습니다. 대본에서 "PG 호출 오류율" 대신 **DNS 탭의 NXDOMAIN·지연**으로 말합니다.
+- 촬영 전 `./demo.sh pg-status` 로 체크아웃이 201 인지 확인합니다.
+- PG 호출(HTTPS)의 내용은 Node.js 라 eBPF 로 볼 수 없습니다. 대본에서 "PG 호출 오류율" 대신 **DNS 탭의 NXDOMAIN·지연**으로 말합니다.
 
 ---
 

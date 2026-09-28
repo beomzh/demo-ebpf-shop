@@ -10,10 +10,10 @@
 #   traffic    부하 발생기 로그 실시간 보기
 #
 # 추가 시나리오 — 외부 PG사 도메인 DNS 장애 (주문·결제 서비스가 사내 DNS 로 PG 도메인 조회)
-#   pg-missing       PG사가 새 도메인으로 이전 → 앱은 새 도메인으로 배포됐지만 사내 DNS 에 등록 누락 → NXDOMAIN
-#                    (Java UnknownHostException, Node queryA ENOTFOUND, 체크아웃 502)
+#   pg-missing       PG사가 새 도메인으로 이전 → 결제 서비스는 새 도메인으로 배포됐지만 사내 DNS 에 등록 누락
+#                    → NXDOMAIN (결제 서비스 로그 'DNS NXDOMAIN', 체크아웃 502)
 #   pg-register      해결: 사내 DNS 에 새 도메인 등록 → 앱 재시작 없이 회복 (corporate 모드: 등록될 때까지 기다림)
-#   pg-primary-down  사내 주 DNS 장애 → 타임아웃 후 보조 DNS 로 넘어감 (결제 지연, dns fallback 로그)
+#   pg-primary-down  사내 주 DNS 장애 → 타임아웃 후 보조 DNS 로 넘어감 (결제 약 2초 지연, dns fallback 로그)
 #   pg-reset         PG 시나리오 원상 복구 (다음 테이크 준비)
 #   pg-status        사내 DNS 서버별 응답과 체크아웃 1건 결과
 source "$(dirname "$0")/lib.sh"
@@ -108,14 +108,13 @@ corpdns() {   # bastion 모드: 이 호스트의 corpdns-ext 로 사내 DNS 를 
 }
 
 set_pg_domain() {
-  info "주문·결제 서비스 PG_DOMAIN=$1 (재시작)"
-  kc -n "$APP_NS" set env deploy/order-service deploy/payment-service "PG_DOMAIN=$1" >/dev/null
-  kc -n "$APP_NS" rollout status deploy/order-service --timeout=180s >/dev/null
+  info "결제 서비스 PG_DOMAIN=$1 (재시작)"
+  kc -n "$APP_NS" set env deploy/payment-service "PG_DOMAIN=$1" >/dev/null
   kc -n "$APP_NS" rollout status deploy/payment-service --timeout=180s >/dev/null
 }
 
 block_primary_dns() {
-  info "주문·결제 서비스 → 주 DNS(${CORP_DNS_PRIMARY}) 패킷 차단 (응답 없음 = 타임아웃)"
+  info "결제 서비스 → 주 DNS(${CORP_DNS_PRIMARY}) 패킷 차단 (응답 없음 = 타임아웃)"
   kc apply -f - >/dev/null <<EOF
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -128,8 +127,7 @@ metadata:
     demo.observ/description: "주 사내 DNS ${CORP_DNS_PRIMARY} 장애 흉내 (corporate 모드)"
 spec:
   podSelector:
-    matchExpressions:
-      - { key: app, operator: In, values: [order-service, payment-service] }
+    matchLabels: { app: payment-service }
   policyTypes: [Egress]
   egress:
     - to:
@@ -189,7 +187,7 @@ const dns = require('node:dns');
     const r = new dns.promises.Resolver({ timeout: 2000, tries: 1 }); r.setServers([s]);
     const t = Date.now();
     try { console.log('  ' + (i ? 'secondary' : 'primary  ') + ' ' + s + '  ' + host + ' → ' + (await r.resolve4(host)).join(',') + ' (' + (Date.now() - t) + 'ms)'); }
-    catch (e) { console.log('  ' + (i ? 'secondary' : 'primary  ') + ' ' + s + '  ' + host + ' → ' + e.code + ' (' + (Date.now() - t) + 'ms)'); }
+    catch (e) { const m = { ENOTFOUND: 'NXDOMAIN', ENODATA: 'NODATA', ESERVFAIL: 'SERVFAIL', EREFUSED: 'REFUSED', ETIMEOUT: 'TIMEOUT' }; console.log('  ' + (i ? 'secondary' : 'primary  ') + ' ' + s + '  ' + host + ' → ' + (m[e.code] || e.code) + ' (' + e.code + ', ' + (Date.now() - t) + 'ms)'); }
   }
 })();" || warn "payment-service exec 실패"
   [[ "$CORP_DNS_MODE" == bastion ]] && { info "bastion 사내 DNS 컨테이너"; corpdns status || true; }
@@ -228,7 +226,7 @@ case "${1:-}" in
     # PG사가 새 도메인으로 이전 → 앱은 새 도메인으로 배포됐지만 사내 DNS 에 등록이 누락된 상황
     [[ "$CORP_DNS_MODE" == bastion ]] && corpdns record-remove "$PG_UNREGISTERED_DOMAIN" >/dev/null
     set_pg_domain "$PG_UNREGISTERED_DOMAIN"
-    ok "사내 DNS 에 ${PG_UNREGISTERED_DOMAIN} 없음 — 체크아웃이 실패합니다 (로그: UnknownHostException / queryA ENOTFOUND)"
+    ok "사내 DNS 에 ${PG_UNREGISTERED_DOMAIN} 없음 — 체크아웃이 실패합니다 (결제 서비스 로그: DNS NXDOMAIN)"
     ok "해결 장면: './demo.sh pg-register' (사내 DNS 에 등록)"
     ;;
   pg-register)
@@ -241,7 +239,7 @@ case "${1:-}" in
     else
       block_primary_dns
     fi
-    ok "주 DNS 장애 재현 — 체크아웃이 약 4초로 느려지고 dns fallback 로그가 남습니다"
+    ok "주 DNS 장애 재현 — 체크아웃이 약 2초 느려지고 결제 서비스에 dns fallback 로그가 남습니다"
     ;;
   pg-reset)
     if [[ "$CORP_DNS_MODE" == bastion ]]; then

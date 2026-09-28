@@ -74,20 +74,18 @@ services:
   order-service:
     <<: [*common, *ocp-restricted]
     build: ../services/order-service
-    environment: &pg-env
-      PG_DOMAIN: api.pg.example
-      PG_DNS_SERVERS: 172.28.0.53,172.28.0.54   # 사내 DNS 주, 보조
-      PG_DNS_TIMEOUT_MS: "2000"
-      PG_CA_FILE: /etc/demo-ca/ca.crt
-    volumes: &pg-ca
-      - ../courier-ext/certs/ca.crt:/etc/demo-ca/ca.crt:ro,Z
     depends_on: [member-service, inventory-service, payment-service, notification-service, delivery-service]
 
   payment-service:
     <<: [*common, *ocp-restricted]
     build: ../services/payment-service
-    environment: *pg-env
-    volumes: *pg-ca
+    environment:   # 외부 PG 는 결제 서비스만 호출한다
+      PG_DOMAIN: api.pg.example
+      PG_DNS_SERVERS: 172.28.0.53,172.28.0.54   # 사내 DNS 주, 보조
+      PG_DNS_TIMEOUT_MS: "2000"
+      PG_CA_FILE: /etc/demo-ca/ca.crt
+    volumes:
+      - ../courier-ext/certs/ca.crt:/etc/demo-ca/ca.crt:ro,Z
     depends_on: [member-service]
 
   notification-service:
