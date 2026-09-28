@@ -17,7 +17,7 @@ if [[ -f "$HERE/../demo.env" ]]; then
 fi
 COURIER_DOMAIN="${COURIER_DOMAIN:-${ENV_COURIER:-api.courier.example}}"
 PG_DOMAIN="${PG_DOMAIN:-api.pg.example}"
-PG_UNREGISTERED_DOMAIN="${PG_UNREGISTERED_DOMAIN:-api.pg-new.example}"
+PG_UNREGISTERED_DOMAIN="${PG_UNREGISTERED_DOMAIN:-api-new.pg.example}"
 
 mkdir -p "$DIR"
 cd "$DIR"

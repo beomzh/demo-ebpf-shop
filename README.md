@@ -211,7 +211,7 @@ for d in gateway-service order-service delivery-service; do echo "== $d"; oc -n 
 | 5-3 설정 파일 | 작업 PC | `cp demo.env.example demo.env` → IP 2개 수정 | 처음 한 번 |
 | 5-4 인증서 | 작업 PC | `./demo.sh certs` | 처음 한 번 |
 | 5-5 택배사 호스트 | 택배사 호스트 | 보조 IP 추가 → `sudo ./run.sh up` | 처음 한 번 |
-| 5-5b 사내 DNS (PG 시나리오) | bastion | IP 2개 추가 → `./demo.sh certs` → `sudo ./courier-ext/run.sh up` → `sudo ./demo.sh corpdns up` | 처음 한 번 |
+| 5-5b 사내 DNS (PG 시나리오) | bastion / 사내 DNS 서버 | bastion 모드: IP 2개 추가 → `./demo.sh certs` → `sudo ./courier-ext/run.sh up` → `sudo ./demo.sh corpdns up`<br/>corporate 모드: 사내 DNS 에 PG 레코드 등록 (또는 BIND 주·보조 직접 구성) → `./demo.sh certs` → `sudo ./courier-ext/run.sh up` | 처음 한 번 |
 | 5-6 레지스트리 route | 작업 PC | `./demo.sh registry-route` | 클러스터당 한 번 |
 | 5-7 사전 점검 | 작업 PC | `./demo.sh check` | 배포 전 |
 | 5-8 이미지 push | 작업 PC | `./demo.sh push` | 처음·코드 변경 때 |
@@ -339,7 +339,7 @@ COURIER_NEW_IP=10.0.0.62     # 택배사 호스트에 새로 붙일 보조 IP
 | `PG_IP` | (비움 = `COURIER_OLD_IP`) | PG 도메인이 가리킬 IP. 택배사 호스트 nginx 가 PG 도 응답 |
 | `CORP_DNS_PRIMARY` / `CORP_DNS_SECONDARY` | `10.0.0.63` / `10.0.0.64` | 사내 DNS 주·보조 IP |
 | `CORP_DNS_MODE` | `bastion` | `bastion`(이 저장소로 띄움) 또는 `corporate`(실제 사내 DNS) |
-| `PG_UNREGISTERED_DOMAIN` | `api.pg-new.example` | corporate 모드의 "레코드 없음" 재현에 쓸, 사내 DNS 에 없는 도메인 |
+| `PG_UNREGISTERED_DOMAIN` | `api-new.pg.example` | corporate 모드의 "레코드 없음" 재현에 쓸 이름. **PG 도메인과 같은 존 안의, 사내 DNS 에 없는 이름** |
 | `LOADGEN_REPLICAS` | `1` | 부하 발생기 파드 수 (파드 1개 = 초당 체크아웃·배송 조회·둘러보기 각 1건) — [6-1](#6-1-요청량-늘리기) |
 | `LOADGEN_*_INTERVAL` | `1` | 파드 하나의 요청 간격(초) |
 
@@ -585,13 +585,158 @@ sudo ./demo.sh corpdns up
 - 되돌리기: `sudo cp -a /etc/named.conf.bak-demo /etc/named.conf && sudo rndc reconfig`
 - dnsmasq 라면 `/etc/dnsmasq.conf` 에 `bind-interfaces` + `listen-address=<원래 IP>` 로 같은 효과를 냅니다.
 
-#### corporate 모드 (`CORP_DNS_MODE=corporate`) **[사내 DNS 담당자에게 요청]**
+#### corporate 모드 (`CORP_DNS_MODE=corporate`) — 실제 사내 DNS 사용
 
-1. `demo.env`: `CORP_DNS_MODE=corporate`, `CORP_DNS_PRIMARY`·`CORP_DNS_SECONDARY` 에 실제 사내 DNS IP
-2. 사내 DNS 에 A 레코드 등록: `api.pg.example → <PG_IP>` (주·보조 모두에 반영되는지 확인)
-3. `PG_UNREGISTERED_DOMAIN`(기본 `api.pg-new.example`)은 **등록하지 않습니다** — "레코드 없음" 재현에 씁니다
-4. 클러스터 노드 → 사내 DNS 53/udp·tcp 가 열려 있는지 확인
-5. 외부 API nginx 는 bastion 모드와 같이 `./demo.sh certs` → `sudo ./courier-ext/run.sh up`
+실제 사내 DNS 서버로 시연합니다. 이 저장소의 `corpdns-ext`, 사내 DNS 용 IP 2개 추가, named `listen-on` 조정은 **필요 없습니다.**
+
+예시 구성 (IP 는 예시):
+
+| 역할 | 서버 | 비고 |
+| --- | --- | --- |
+| 작업 PC · 외부 API nginx (택배사·PG) | bastion `10.0.0.100` + 보조 IP `10.0.0.61`·`10.0.0.62` | `./courier-ext/run.sh up` 을 **이 한 서버에서만** |
+| 사내 주 DNS | `10.0.0.50` (BIND master) | `CORP_DNS_PRIMARY` |
+| 사내 보조 DNS | `10.0.0.100` (bastion 의 named, slave) | `CORP_DNS_SECONDARY` |
+
+`demo.env`:
+
+```bash
+CORP_DNS_MODE=corporate
+CORP_DNS_PRIMARY=10.0.0.50
+CORP_DNS_SECONDARY=10.0.0.100
+PG_DOMAIN=api.pg.example
+PG_IP=                                  # 비우면 COURIER_OLD_IP(10.0.0.61) — nginx 가 듣는 IP 여야 함
+PG_UNREGISTERED_DOMAIN=api-new.pg.example
+```
+
+- **`PG_IP` 는 nginx 가 듣는 IP 여야 합니다.** 다른 서비스가 쓰는 IP(예: ingress 가 쓰는 bastion 기본 IP)를 넣으면 `check` 가 `HTTP 404` 로 실패합니다.
+- **`PG_UNREGISTERED_DOMAIN` 은 PG 도메인과 같은 존 안의 없는 이름**으로 둡니다 (`api-new.pg.example`). 존을 가진 DNS 가 직접 NXDOMAIN 을 답하므로,
+  DNS 서버의 재귀·전달(forwarders) 설정과 상관없이 확실하게 "레코드 없음"이 재현됩니다. 다른 존의 이름을 쓰면 서버 설정에 따라 `SERVFAIL`·`REFUSED` 가 나와
+  "레코드 없음" 대신 "보조 DNS 로 넘어감" 로그가 찍힐 수 있습니다.
+- **`.local` 도메인은 피하세요.** mDNS 전용 예약 이름이라 `dig` 가 경고를 내고, 사내 DNS 정책상 등록이 거부될 수 있습니다. 사내 내부 도메인 아래 이름(예: `pg.demo.<사내 도메인>`)이 가장 무난합니다.
+
+##### A) 사내 DNS 담당자에게 요청하는 경우
+
+| 요청 | 내용 |
+| --- | --- |
+| A 레코드 | `PG_DOMAIN → PG_IP` (예: `api.pg.example → 10.0.0.61`). 주·보조 모두 반영 |
+| TTL | 짧게 (5~60초) — 레코드 삭제로 시연할 때 빨리 반영되게 |
+| 등록하지 않기 | `PG_UNREGISTERED_DOMAIN` |
+| 질의 허용 | 클러스터 **노드 IP** 대역에서 53/udp·tcp (파드가 밖으로 나갈 때 출발지가 노드 IP 로 바뀜) |
+
+##### B) BIND 로 주·보조를 직접 구성하는 경우
+
+주 DNS(master)에서 존을 관리하고, 보조 DNS(slave)가 자동으로 복제합니다. 실제 사내 DNS 와 같은 구조라 "주 DNS 장애 → 보조 응답"이 그대로 재현됩니다.
+
+**주 DNS (`10.0.0.50`)**
+
+```bash
+sudo ss -lunp | grep ':53 '            # 다른 DNS(dnsmasq 등)가 53 을 쓰고 있지 않은지
+sudo dnf install -y bind bind-utils     # named 가 없을 때만
+sudo cp -a /etc/named.conf /etc/named.conf.bak-pg
+sudo vi /etc/named.conf
+```
+
+`options` 안 (RHEL 기본값은 127.0.0.1·localhost 만 허용하므로 바꿔야 함):
+
+```
+listen-on port 53 { 127.0.0.1; 10.0.0.50; };    # 이미 { any; } 면 그대로
+allow-query     { any; };                        # 또는 클러스터 노드 대역
+allow-transfer  { 10.0.0.100; };                 # 보조 DNS 만 복제 허용
+```
+
+파일 맨 아래:
+
+```
+zone "pg.example" IN {
+    type master;
+    file "pg.example.zone";
+    notify yes;
+    also-notify { 10.0.0.100; };
+};
+```
+
+`/var/named/pg.example.zone`:
+
+```
+$TTL 5
+@      IN SOA ns1.pg.example. admin.pg.example. ( 2026092801 60 60 600 5 )
+@      IN NS  ns1.pg.example.
+@      IN NS  ns2.pg.example.
+ns1    IN A   10.0.0.50
+ns2    IN A   10.0.0.100
+api    IN A   10.0.0.61
+```
+
+```bash
+sudo chown root:named /var/named/pg.example.zone
+systemctl is-active firewalld && sudo firewall-cmd --add-service=dns --permanent && sudo firewall-cmd --reload
+sudo named-checkconf && sudo named-checkzone pg.example /var/named/pg.example.zone
+sudo systemctl enable --now named
+sudo rndc reload                       # ← named 가 이미 돌고 있었다면 이것으로 새 설정·존을 읽힘
+sudo rndc zonestatus pg.example        # serial: 2026092801 이 보이면 로드됨
+dig +short @10.0.0.50 api.pg.example   # 10.0.0.61
+```
+
+> **`systemctl enable --now named` 만으로는 반영되지 않을 수 있습니다.** 이미 실행 중인 named 는 다시 시작하지 않기 때문입니다.
+> 결과가 비어 있으면 `sudo rndc reload`(안 되면 `sudo systemctl restart named`), 원인은 `journalctl -u named --since "5 min ago"`.
+> `forwarders`·`forward only` 가 설정돼 있어도, 직접 가진 존(`pg.example`)은 전달하지 않고 이 서버가 답합니다.
+
+**보조 DNS (`10.0.0.100`, bastion 의 named)**
+
+`/etc/named.conf` 맨 아래 (master 로 넣어 둔 같은 존이 있으면 이것으로 바꿈):
+
+```
+zone "pg.example" IN {
+    type slave;
+    masters { 10.0.0.50; };
+    file "slaves/pg.example.zone";
+};
+```
+
+```bash
+sudo named-checkconf && sudo rndc reload
+sudo rndc retransfer pg.example
+dig +short @10.0.0.100 api.pg.example   # 10.0.0.61 (주 DNS 에서 복제됨)
+```
+
+bastion named 의 `listen-on` 을 좁혀 두었다면 `10.0.0.100` 이 포함돼 있어야 합니다.
+
+**확인 (두 서버 모두)**
+
+```bash
+dig +short @10.0.0.50  api.pg.example              # 10.0.0.61
+dig +short @10.0.0.100 api.pg.example              # 10.0.0.61
+dig @10.0.0.50  api-new.pg.example | grep status   # NXDOMAIN
+dig @10.0.0.100 api-new.pg.example | grep status   # NXDOMAIN
+```
+
+##### corporate 모드 시연 — 스크립트 또는 실제 DNS 조작
+
+| 시연 | 스크립트 (DNS 는 그대로) | 실제 DNS 조작 (B 구성일 때) | 앱 로그 |
+| --- | --- | --- | --- |
+| 레코드 없음 | `./demo.sh pg-missing` — 주문·결제의 PG 도메인을 `PG_UNREGISTERED_DOMAIN` 으로 교체 | 주 DNS 존 파일에서 `api` 줄 삭제 + **SOA 시리얼 증가** → `sudo rndc reload` (보조에도 자동 반영) | `java.net.UnknownHostException … NXDOMAIN` / `queryA ENOTFOUND` |
+| 주 DNS 장애 | `./demo.sh pg-primary-down` — 주 DNS 로 가는 패킷 차단 → **2초 타임아웃 후 보조** | 주 DNS 에서 `sudo systemctl stop named` → **즉시 연결 거부 후 보조** | `dns fallback … primary → ETIMEOUT`(또는 `ECONNREFUSED`) `\| secondary → IP` |
+| 복구 | `./demo.sh pg-reset` | 레코드 복구 + 시리얼 증가 + `rndc reload` / `sudo systemctl start named` | — |
+
+- 레코드를 고칠 때마다 SOA **시리얼을 올려야** 보조 DNS 로 복제됩니다 (`2026092801` → `2026092802` …).
+- 서버가 통째로 죽은 것처럼 **결제가 2초씩 느려지는 모습**을 보여주려면 스크립트의 `pg-primary-down` 이 적합합니다. named 만 멈추면 즉시 거부라 지연이 거의 없습니다.
+
+##### 주의: 같은 IP 를 두 서버에 붙이지 마세요
+
+택배사·PG 용 IP(`COURIER_OLD_IP`·`COURIER_NEW_IP`)와 nginx 는 **한 서버에만** 둡니다. 두 서버에 같은 IP 가 있으면 ARP 응답이 번갈아 바뀌어 연결이 됐다 안 됐다 합니다.
+
+```bash
+ip -4 -brief addr | grep '10.0.0.6'      # 각 서버에서 — 데모용 IP 가 한 서버에만 있어야 함
+```
+
+다른 서버에 남아 있으면 그 서버에서 정리합니다 (bastion 모드에서 쓰던 사내 DNS IP `.63`·`.64` 도 corporate 모드에서는 필요 없음):
+
+```bash
+./courier-ext/run.sh down
+./courier-ext/setup-ips.sh del <NIC> 10.0.0.61/<prefix>
+./courier-ext/setup-ips.sh del <NIC> 10.0.0.62/<prefix>
+nmcli con mod <연결이름> -ipv4.addresses 10.0.0.61/<prefix> -ipv4.addresses 10.0.0.62/<prefix>   # 영구 설정했다면
+```
 
 두 모드 모두 `./demo.sh check` 의 5번 항목(`[클러스터 → 사내 DNS …] … OK`, `[클러스터 → PG] … OK`)이 통과해야 합니다.
 
@@ -1054,6 +1199,10 @@ oc adm policy add-scc-to-user privileged -z <agent-serviceaccount> -n <agent-nam
 | 배포 후 체크아웃이 전부 502, 경로 끝이 `pg(api.pg.example) [queryA ENOTFOUND …]` | 사내 DNS 에 PG 도메인이 없음 — `pg-missing` 을 켜 둔 상태인지(`./demo.sh pg-reset`), bastion 사내 DNS 를 띄웠는지(`sudo ./demo.sh corpdns status`) |
 | 체크아웃이 항상 4초 이상, `dns fallback` WARN 반복 | 주 DNS 가 응답하지 않음 — `pg-primary-down` 상태인지(`./demo.sh pg-reset`), 노드 → 주 DNS 53/udp 가 막혀 있지 않은지 |
 | 경로 끝이 `pg(…) [… SSLHandshakeException …]` / `unable to verify the first certificate` | PG 인증서를 데모 CA 로 검증하지 못함 — `./demo.sh certs` 후 `sudo ./courier-ext/run.sh up`, `courier-ca` 시크릿이 같은 CA 인지 (`./demo.sh deploy`) |
+| 사내 DNS 에 존을 추가했는데 `dig` 결과가 비어 있음 | named 가 새 설정을 안 읽음 → `sudo rndc reload` (안 되면 `systemctl restart named`), `sudo rndc zonestatus <존>` |
+| 보조 DNS 만 옛 레코드를 답함 | 주 DNS 존의 SOA 시리얼을 안 올렸음 → 시리얼 증가 후 `rndc reload`, 보조에서 `rndc retransfer <존>` |
+| 택배사·PG 연결이 됐다 안 됐다 함 | 같은 데모용 IP 가 두 서버에 붙어 있음 → [corporate 모드 '주의'](#주의-같은-ip-를-두-서버에-붙이지-마세요) |
+| `check` 의 `[클러스터 → PG] … HTTP 404` | `PG_IP` 가 nginx 가 듣는 IP 가 아님 (다른 웹서버가 응답) → `PG_IP=` 로 비우기 |
 | `check` 의 점검 파드가 `violates PodSecurity "restricted:latest"` | 이전 버전 스크립트. `git pull` (점검 파드에 restricted 보안 설정이 들어간 버전) |
 | `corpdns up` 이 `…:53 을 이미 다른 프로세스가 쓰고 있습니다: …named…` | bastion named 가 데모용 IP 의 53 을 잡음 → [5-5b 'named 가 쓰는 경우'](#53-을-bastion-의-namedbind-가-쓰는-경우) |
 | `./demo.sh corpdns up` 이 `다른 프로그램이 모든 IP 의 53/udp 를 쓰고 있습니다` | bastion 의 dnsmasq·named 등이 `0.0.0.0:53` 사용 중 — 그 프로그램을 자기 IP 로 좁히거나(5-5 의 443 방법과 같음) 별도 VM 사용 |
