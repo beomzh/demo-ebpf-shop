@@ -7,6 +7,8 @@
 # 도메인은 ../demo.env 에서 읽고, 없으면 기본값을 쓴다.
 set -euo pipefail
 
+command -v openssl >/dev/null || { echo "[gen-certs] ERROR: openssl 이 필요합니다 (RHEL: dnf install -y openssl)" >&2; exit 1; }
+
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DIR="$HERE/certs"
 COURIER_DOMAIN="${1:-}"
@@ -42,7 +44,28 @@ if [[ ! -f ca.crt ]]; then
   echo "[gen-certs] CA 생성"
 fi
 
-[[ -f courier.crt ]] && echo "[gen-certs] courier.crt 있음 (건너뜀)" || issue courier "$COURIER_DOMAIN"
-[[ -f pg.crt ]] && echo "[gen-certs] pg.crt 있음 (건너뜀)" || issue pg "$PG_DOMAIN" "$PG_UNREGISTERED_DOMAIN"
+# has_names <인증서> <도메인...> : 인증서 SAN 에 도메인이 모두 들어 있으면 0
+has_names() {
+  local crt="$1" sans d; shift
+  sans="$(openssl x509 -in "$crt" -noout -text 2>/dev/null | grep -A1 'Subject Alternative Name' | tail -1)"
+  for d in "$@"; do [[ "$sans" == *"DNS:$d"* ]] || return 1; done
+}
+
+# ensure <이름> <도메인...> : 없으면 발급, 도메인이 설정과 다르면 같은 CA 로 재발급
+ensure() {
+  local name="$1"; shift
+  if [[ ! -f "$name.crt" ]]; then
+    issue "$name" "$@"
+  elif has_names "$name.crt" "$@"; then
+    echo "[gen-certs] $name.crt 있음, 도메인 일치 (건너뜀)"
+  else
+    echo "[gen-certs] $name.crt 의 도메인이 설정과 다름 → 재발급 (CA 는 그대로라 클러스터 시크릿 변경 불필요)"
+    issue "$name" "$@"
+    echo "[gen-certs] 외부 API 호스트에서 nginx 를 다시 띄우세요: ./courier-ext/run.sh up"
+  fi
+}
+
+ensure courier "$COURIER_DOMAIN"
+ensure pg "$PG_DOMAIN" "$PG_UNREGISTERED_DOMAIN"
 
 echo "[gen-certs] $DIR"

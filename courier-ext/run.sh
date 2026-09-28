@@ -24,6 +24,17 @@ elif command -v podman >/dev/null; then ENGINE=podman
 elif command -v docker >/dev/null; then ENGINE=docker
 else echo "podman 또는 docker 가 필요합니다." >&2; exit 1; fi
 
+# 택배사 도메인: COURIER_DOMAIN 환경변수 → ../demo.env → 기본값
+courier_domain() {
+  if [[ -n "${COURIER_DOMAIN:-}" ]]; then echo "$COURIER_DOMAIN"; return; fi
+  if [[ -f ../demo.env ]]; then
+    # shellcheck disable=SC1091
+    ( set -a; source ../demo.env; echo "${COURIER_DOMAIN:-api.courier.example}" )
+  else
+    echo api.courier.example
+  fi
+}
+
 listen_ips() {
   if [[ -n "${LISTEN_IPS:-}" ]]; then echo "$LISTEN_IPS"; return; fi
   if [[ -f ../demo.env ]]; then
@@ -36,6 +47,7 @@ render_conf() {
   local ips="$1" ip
   if [[ -z "${ips// /}" ]]; then
     cp nginx.conf "$RENDERED"
+    set_courier_domain
     echo "listen: 0.0.0.0:443 (모든 IP)"
     return
   fi
@@ -59,7 +71,15 @@ render_conf() {
     }
     { print }
   ' nginx.conf > "$RENDERED"
+  set_courier_domain
   echo "listen: $(echo $ips | sed 's/ /:443, /g'):443"
+}
+
+# 택배사 서버 블록의 server_name 을 실제 도메인으로 (TLS SNI 로 블록을 고르므로 다르면 PG 인증서가 나간다)
+set_courier_domain() {
+  local d; d="$(courier_domain)"
+  sed -i.bak "s#server_name api\.courier\.example;#server_name ${d};#" "$RENDERED" && rm -f "$RENDERED.bak"
+  echo "courier domain: ${d}"
 }
 
 case "${1:-up}" in
@@ -76,7 +96,7 @@ case "${1:-up}" in
     sleep 2
     if "$ENGINE" ps --filter "name=$NAME" --filter status=running -q | grep -q .; then
       echo "[$ENGINE] $NAME started."
-      echo "check: curl -sk --resolve api.courier.example:443:<IP> https://api.courier.example/v1/tracking/T1"
+      echo "check: curl -sk --resolve $(courier_domain):443:<IP> https://$(courier_domain)/v1/tracking/T1"
     else
       echo "ERROR: $NAME 기동 실패. 로그:" >&2
       "$ENGINE" logs "$NAME" 2>&1 | tail -5 >&2
