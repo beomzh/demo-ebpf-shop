@@ -1,11 +1,80 @@
-# 회원(Java)·상품(Go)·주문(Java)·결제(Node.js) 서비스.
+# 쇼핑몰 서비스 (배송 서비스는 30-delivery.yaml).
+#   게이트웨이(C#) · 회원(Java) · 상품(Go) · 재고(Ruby) · 주문(Java) · 결제(Node.js) · 알림(PHP)
 # 모니터링 SDK·에이전트·사이드카·어노테이션을 일부러 하나도 두지 않는다.
 # 프로브는 tcpSocket 으로 두어 kubelet 의 HTTP 요청이 지표에 섞이지 않게 한다.
 #
+# 호출 관계 (모든 서비스가 요청을 받고, 다른 서비스를 호출한다):
+#   loadgen → gateway ─┬→ product → inventory → Redis
+#                      ├→ member → MySQL
+#                      └→ order ─┬→ member → MySQL
+#                                ├→ inventory → Redis
+#                                ├→ payment → member
+#                                ├→ notification → member
+#                                └→ delivery → 외부 택배사 (HTTPS)
+#
 # 보안: restricted-v2 SCC / Pod Security restricted 를 만족한다.
 #   - runAsUser 는 지정하지 않는다 (OpenShift 가 네임스페이스 범위의 임의 UID 를 부여)
-#   - 루트 파일시스템 읽기 전용. JVM 이 쓰는 /tmp 만 emptyDir 로 연다
+#   - 루트 파일시스템 읽기 전용. 임시파일이 필요한 런타임을 위해 /tmp 만 emptyDir 로 연다
 #   - ServiceAccount 토큰 미마운트 (쿠버네티스 API 를 쓰지 않음)
+# ── 게이트웨이 (C# / .NET) — 입구. loadgen 이 호출 ─────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway-service
+  namespace: shop
+  labels: { app: gateway-service }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: gateway-service }
+  template:
+    metadata:
+      labels: { app: gateway-service }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: gateway-service
+          image: __REGISTRY__/shop-gateway-service:__TAG__
+          imagePullPolicy: Always
+          env:
+            - { name: PRODUCT_URL, value: "http://product-service:8080" }
+            - { name: MEMBER_URL, value: "http://member-service:8080" }
+            - { name: ORDER_URL, value: "http://order-service:8080" }
+            - { name: TRACKING_TIMEOUT_SECONDS, value: "15" }
+            - { name: DOTNET_gcServer, value: "0" }
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            tcpSocket: { port: 8080 }
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 384Mi }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway-service
+  namespace: shop
+spec:
+  selector: { app: gateway-service }
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }
+
+---
+# ── 회원 (Java) — MySQL ──────────────────────────────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -29,8 +98,7 @@ spec:
           image: __REGISTRY__/shop-member-service:__TAG__
           imagePullPolicy: Always
           env:
-            - name: DB_URL
-              value: jdbc:mysql://mysql:3306/shop?useSSL=false&allowPublicKeyRetrieval=true
+            - { name: DB_URL, value: "jdbc:mysql://mysql:3306/shop?useSSL=false&allowPublicKeyRetrieval=true" }
             - name: DB_USER
               valueFrom: { secretKeyRef: { name: mysql-auth, key: MYSQL_USER } }
             - name: DB_PASSWORD
@@ -62,7 +130,9 @@ spec:
   selector: { app: member-service }
   ports:
     - { name: http, port: 8080, targetPort: 8080 }
+
 ---
+# ── 상품 (Go) — 재고 호출 ────────────────────────────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -85,6 +155,8 @@ spec:
         - name: product-service
           image: __REGISTRY__/shop-product-service:__TAG__
           imagePullPolicy: Always
+          env:
+            - { name: INVENTORY_URL, value: "http://inventory-service:8080" }
           ports:
             - containerPort: 8080
           readinessProbe:
@@ -97,6 +169,11 @@ spec:
           resources:
             requests: { cpu: 20m, memory: 32Mi }
             limits: { memory: 128Mi }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -107,7 +184,66 @@ spec:
   selector: { app: product-service }
   ports:
     - { name: http, port: 8080, targetPort: 8080 }
+
 ---
+# ── 재고 (Ruby) — Redis ──────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory-service
+  namespace: shop
+  labels: { app: inventory-service }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: inventory-service }
+  template:
+    metadata:
+      labels: { app: inventory-service }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: inventory-service
+          image: __REGISTRY__/shop-inventory-service:__TAG__
+          imagePullPolicy: Always
+          env:
+            - { name: REDIS_HOST, value: "redis" }
+            - { name: REDIS_PORT, value: "6379" }
+            - name: REDIS_PASSWORD
+              valueFrom: { secretKeyRef: { name: redis-auth, key: REDIS_PASSWORD } }
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            tcpSocket: { port: 8080 }
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 20m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory-service
+  namespace: shop
+spec:
+  selector: { app: inventory-service }
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }
+
+---
+# ── 주문 (Java) — 회원·재고·결제·알림·배송 호출 ────────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -132,8 +268,9 @@ spec:
           imagePullPolicy: Always
           env:
             - { name: MEMBER_URL, value: "http://member-service:8080" }
-            - { name: PRODUCT_URL, value: "http://product-service:8080" }
+            - { name: INVENTORY_URL, value: "http://inventory-service:8080" }
             - { name: PAYMENT_URL, value: "http://payment-service:8080" }
+            - { name: NOTIFICATION_URL, value: "http://notification-service:8080" }
             - { name: DELIVERY_URL, value: "http://delivery-service:8080" }
             - { name: DELIVERY_TIMEOUT_SECONDS, value: "10" }
           ports:
@@ -163,7 +300,9 @@ spec:
   selector: { app: order-service }
   ports:
     - { name: http, port: 8080, targetPort: 8080 }
+
 ---
+# ── 결제 (Node.js) — 회원 호출 ───────────────────────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -186,6 +325,8 @@ spec:
         - name: payment-service
           image: __REGISTRY__/shop-payment-service:__TAG__
           imagePullPolicy: Always
+          env:
+            - { name: MEMBER_URL, value: "http://member-service:8080" }
           ports:
             - containerPort: 8080
           readinessProbe:
@@ -198,6 +339,11 @@ spec:
           resources:
             requests: { cpu: 20m, memory: 64Mi }
             limits: { memory: 256Mi }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -206,5 +352,59 @@ metadata:
   namespace: shop
 spec:
   selector: { app: payment-service }
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }
+
+---
+# ── 알림 (PHP) — 회원 호출 ───────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service
+  namespace: shop
+  labels: { app: notification-service }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: notification-service }
+  template:
+    metadata:
+      labels: { app: notification-service }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: notification-service
+          image: __REGISTRY__/shop-notification-service:__TAG__
+          imagePullPolicy: Always
+          env:
+            - { name: MEMBER_URL, value: "http://member-service:8080" }
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            tcpSocket: { port: 8080 }
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 20m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-service
+  namespace: shop
+spec:
+  selector: { app: notification-service }
   ports:
     - { name: http, port: 8080, targetPort: 8080 }

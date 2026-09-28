@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 쇼핑몰 다섯 서비스 + 데모 장치(택배사 DNS, 방화벽, 부하 발생기)를 배포한다.
+# 쇼핑몰 여덟 서비스 + MySQL·Redis + 데모 장치(택배사 DNS, 방화벽, 부하 발생기)를 배포한다.
 # 배포 직후 상태 = "월요일 밤 이전" 정상 상태 (DNS → 예전 IP, 방화벽 → 예전 IP 허용)
 source "$(dirname "$0")/lib.sh"
 load_env
@@ -17,7 +17,7 @@ if [[ "$REGISTRY_MODE" == ocp-internal ]]; then
     kc -n "$APP_NS" get istag "$(image_name "$svc"):${TAG}" >/dev/null 2>&1 \
       || die "이미지 $(image_name "$svc"):${TAG} 가 ImageStream 에 없습니다. './demo.sh push' 를 먼저 실행하세요."
   done
-  ok "이미지 5개 확인"
+  ok "이미지 ${#SERVICES[@]}개 확인"
 fi
 
 [[ -f "$ROOT/courier-ext/certs/ca.crt" ]] \
@@ -37,6 +37,13 @@ else
     --from-literal=MYSQL_PASSWORD="$(openssl rand -hex 16)" \
     --from-literal=MYSQL_ROOT_PASSWORD="$(openssl rand -hex 16)" >/dev/null
 fi
+if kc -n "$APP_NS" get secret redis-auth >/dev/null 2>&1; then
+  info "redis-auth secret 이미 있음 (유지)"
+else
+  info "redis-auth secret 생성 (무작위 비밀번호)"
+  kc -n "$APP_NS" create secret generic redis-auth \
+    --from-literal=REDIS_PASSWORD="$(openssl rand -hex 16)" >/dev/null
+fi
 
 info "courier-dns (택배사 도메인 → ${COURIER_OLD_IP})"
 render "$K/40-courier-dns.yaml" | kc apply -f -
@@ -45,8 +52,9 @@ dns_ip="$(courier_dns_ip)"
 [[ -n "$dns_ip" ]] || die "courier-dns ClusterIP 를 가져오지 못했습니다."
 info "courier-dns ClusterIP = ${dns_ip}"
 
-info "mysql + 다섯 서비스"
+info "mysql + redis + 여덟 서비스"
 render "$K/10-mysql.yaml" | kc apply -f -
+render "$K/15-redis.yaml" | kc apply -f -
 render "$K/20-services.yaml" | kc apply -f -
 render "$K/30-delivery.yaml" "$dns_ip" | kc apply -f -
 
@@ -58,11 +66,12 @@ render "$K/55-network-isolation.yaml" | kc apply -f -
 
 info "rollout 대기"
 kc -n "$APP_NS" rollout status deploy/mysql --timeout=300s
-for d in member-service product-service order-service payment-service delivery-service; do
+kc -n "$APP_NS" rollout status deploy/redis --timeout=300s
+for d in "${SERVICES[@]}"; do
   kc -n "$APP_NS" rollout status "deploy/$d" --timeout=300s
 done
 
-info "loadgen (주문 서비스로 트래픽 발생)"
+info "loadgen (게이트웨이로 트래픽 발생)"
 render "$K/60-loadgen.yaml" | kc apply -f -
 kc -n "$INFRA_NS" rollout status deploy/loadgen --timeout=120s
 

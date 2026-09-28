@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NS=shop
 INFRA_NS=demo-infra
 FW_LABEL=demo.observ/firewall=egress
-SERVICES=(member-service product-service order-service payment-service delivery-service)
+SERVICES=(gateway-service member-service product-service inventory-service order-service payment-service notification-service delivery-service)
 
 # OpenShift 내부 이미지 레지스트리
 OCP_REGISTRY_NS=openshift-image-registry
@@ -26,7 +26,7 @@ load_env() {
   : "${TAG:?}" "${COURIER_DOMAIN:?}" "${COURIER_OLD_IP:?}" "${COURIER_NEW_IP:?}"
   : "${CLI:=auto}" "${REGISTRY_MODE:=ocp-internal}" "${REGISTRY:=}"
   : "${CONTAINER_ENGINE:=auto}" "${REGISTRY_TLS_VERIFY:=false}" "${PLATFORM:=linux/amd64}"
-  : "${LOADGEN_ORDER_INTERVAL:=1}" "${LOADGEN_TRACKING_INTERVAL:=1}" "${LOADGEN_REPLICAS:=1}"
+  : "${LOADGEN_ORDER_INTERVAL:=1}" "${LOADGEN_TRACKING_INTERVAL:=1}" "${LOADGEN_REPLICAS:=1}" "${LOADGEN_BROWSE_INTERVAL:=1}"
   [[ "$COURIER_OLD_IP" != "$COURIER_NEW_IP" ]] || die "COURIER_OLD_IP 와 COURIER_NEW_IP 가 같습니다."
   case "$REGISTRY_MODE" in
     ocp-internal) ;;
@@ -112,6 +112,7 @@ render() {
     -e "s#__LOADGEN_ORDER_INTERVAL__#${LOADGEN_ORDER_INTERVAL}#g" \
     -e "s#__LOADGEN_TRACKING_INTERVAL__#${LOADGEN_TRACKING_INTERVAL}#g" \
     -e "s#__LOADGEN_REPLICAS__#${LOADGEN_REPLICAS}#g" \
+    -e "s#__LOADGEN_BROWSE_INTERVAL__#${LOADGEN_BROWSE_INTERVAL}#g" \
     "$1"
 }
 

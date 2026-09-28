@@ -2,8 +2,9 @@
 
 > **"개발팀에 코드 수정을 요청하지 않고도 장애 원인을 찾을 수 있나?"**
 
-앱 코드 수정도, 앱별 에이전트 설치도 하지 않은 **언어가 서로 다른 다섯 서비스**에서
+앱 코드 수정도, 앱별 에이전트 설치도 하지 않은 **일곱 가지 언어로 된 여덟 서비스**에서
 문제를 발견하고, 원인을 좁히고, 해결을 확인하는 데모 환경입니다.
+서비스들은 실제 MSA 처럼 서로 여러 단계로 호출하며(최대 5단계), 모든 서비스가 요청을 받고 다른 서비스를 호출합니다.
 데모 전체가 **배송 조회 실패 사건 하나**로 이어지며, 코드가 아니라 **네트워크**에서 생긴 문제라
 eBPF 가 가장 잘 보여줄 수 있는 사건입니다. 화면에 나오는 모든 데이터는 eBPF 노드 에이전트 수집 결과입니다.
 
@@ -34,16 +35,19 @@ eBPF 가 가장 잘 보여줄 수 있는 사건입니다. 화면에 나오는 �
 
 ## 1. 사건 시나리오
 
-가상 고객사 **"쇼핑몰"** 은 다섯 서비스를 운영합니다. 팀마다 언어도 모니터링 도구도 달라,
+가상 고객사 **"쇼핑몰"** 은 여덟 서비스를 운영합니다. 팀마다 언어도 모니터링 도구도 달라,
 배송 서비스는 모니터링이 아예 없습니다.
 
-| 서비스 | 언어 | 역할 |
-| --- | --- | --- |
-| 회원 `member-service` | Java 21 | 회원 조회 (MySQL) |
-| 상품 `product-service` | Go 1.22 | 상품 조회 |
-| 주문 `order-service` | Java 21 | 주문 생성, 배송 조회 — 다른 서비스를 호출하는 진입점 |
-| 결제 `payment-service` | Node.js 20 | 결제 승인 |
-| 배송 `delivery-service` | Python 3.12 | 외부 택배사 API(HTTPS) 호출. **모니터링 없음** |
+| 서비스 | 언어 | 받는 요청 (누가 호출) | 보내는 요청 (무엇을 호출) |
+| --- | --- | --- | --- |
+| 게이트웨이 `gateway-service` | C# (.NET 8) | 사용자(loadgen) | 상품, 회원, 주문 |
+| 회원 `member-service` | Java 21 | 게이트웨이, 주문, 결제, 알림 | MySQL |
+| 상품 `product-service` | Go 1.22 | 게이트웨이 | 재고 |
+| 재고 `inventory-service` | Ruby 3.3 | 상품, 주문 | Redis |
+| 주문 `order-service` | Java 21 | 게이트웨이 | 회원, 재고, 결제, 알림, 배송 |
+| 결제 `payment-service` | Node.js 20 | 주문 | 회원 (VIP 할인 확인) |
+| 알림 `notification-service` | PHP 8.3 | 주문 | 회원 (연락처·등급 확인) |
+| 배송 `delivery-service` | Python 3.12 | 주문 | 외부 택배사 API (HTTPS). **모니터링 없음** |
 
 | 시각 | 사건 | 데모 | 명령 |
 | --- | --- | --- | --- |
@@ -52,7 +56,7 @@ eBPF 가 가장 잘 보여줄 수 있는 사건입니다. 화면에 나오는 �
 | 화요일 09:10 | 토폴로지 맵에서 택배사 API 로 가는 연결만 실패하는 것을 발견 | 데모 1 | |
 | 화요일 09:20 | DNS 는 정상, 새 IP 로의 연결이 실패 → 방화벽에 새 IP 가 없음 | 데모 2, 3 | `./demo.sh firewall` |
 | 화요일 09:40 | 방화벽 허용 후 실패 연결이 없어진 것 확인 | 데모 4 | `./demo.sh fix` |
-| 다음 주 | 다섯 서비스를 같은 기준으로 보는 공통 대시보드로 표준화 | 데모 4 | |
+| 다음 주 | 여덟 서비스를 같은 기준으로 보는 공통 대시보드로 표준화 | 데모 4 | |
 
 ---
 
@@ -66,12 +70,16 @@ flowchart LR
   end
 
   subgraph shop["namespace: shop (Observ 에서 보는 대상)"]
-    ORD["주문 order-service<br/>Java"]
-    MEM["회원 member-service<br/>Java"]
-    PRD["상품 product-service<br/>Go"]
-    PAY["결제 payment-service<br/>Node.js"]
-    DLV["배송 delivery-service<br/>Python · 모니터링 없음"]
+    GW["게이트웨이<br/>C#"]
+    ORD["주문<br/>Java"]
+    MEM["회원<br/>Java"]
+    PRD["상품<br/>Go"]
+    INV["재고<br/>Ruby"]
+    PAY["결제<br/>Node.js"]
+    NOTI["알림<br/>PHP"]
+    DLV["배송<br/>Python · 모니터링 없음"]
     DB[("MySQL")]
+    RD[("Redis")]
     FW{{"방화벽<br/>NetworkPolicy egress"}}
   end
 
@@ -80,29 +88,69 @@ flowchart LR
     NEW["새 IP :443"]
   end
 
-  LG -->|HTTP| ORD
-  ORD -->|HTTP| MEM --> DB
-  ORD -->|HTTP| PRD
-  ORD -->|HTTP| PAY
-  ORD -->|"HTTP (배송 조회)"| DLV
+  LG --> GW
+  GW --> PRD --> INV --> RD
+  GW --> MEM --> DB
+  GW --> ORD
+  ORD --> MEM
+  ORD --> INV
+  ORD --> PAY --> MEM
+  ORD --> NOTI --> MEM
+  ORD -->|"배송 조회"| DLV
   DLV -.->|DNS| DNS
   DLV --> FW
   FW -->|허용| OLD
   FW -.->|"차단 (SYN drop)"| NEW
 ```
 
+### 사용자 요청별 호출 경로
+
+loadgen 은 사용자 역할이라 게이트웨이만 호출합니다. 게이트웨이부터는 모든 서비스가 요청을 받고, 다른 서비스를 호출합니다.
+
+| 사용자 요청 | 호출 경로 | 깊이 |
+| --- | --- | --- |
+| 체크아웃 `POST /api/checkout` | 게이트웨이 → 상품 → 재고 → Redis<br/>게이트웨이 → 주문 → 회원 → MySQL<br/>　　　　　　　　 → 재고 → Redis<br/>　　　　　　　　 → 결제 → 회원 → MySQL<br/>　　　　　　　　 → 알림 → 회원 → MySQL | 최대 5 |
+| 배송 조회 `GET /api/orders/{id}/tracking` | 게이트웨이 → 주문 → 배송 → **외부 택배사 (HTTPS)** ← 데모 사건 경로 | 4 |
+| 상품 보기 `GET /api/products/{id}` | 게이트웨이 → 상품 → 재고 → Redis | 4 |
+| 회원 보기 `GET /api/members/{id}` | 게이트웨이 → 회원 → MySQL | 3 |
+
+- 체크아웃 한 번에 서비스 간 HTTP 호출 8번 + DB 쿼리가 일어나, 서비스 간 연결선과 호출 수가 풍부하게 쌓입니다.
+- 프로토콜도 여러 가지입니다: HTTP(서비스 간), MySQL, Redis(RESP), DNS, HTTPS(배송 → 택배사).
+
+### 요청 ID (`X-Request-Id`)
+
+loadgen 이 요청마다 `X-Request-Id: lg-…` 를 붙이고, 모든 서비스가 받은 값을 **다음 호출에 그대로 넘기고 로그에 남깁니다.**
+한 요청이 어떤 서비스를 거쳐 어디서 실패했는지 로그로 이어서 볼 수 있습니다.
+
+```
+$ ./demo.sh traffic
+09:10:21 502 5.034s lg-3fa9c1d2e8b0 GET /api/orders/1374/tracking
+
+$ oc -n shop logs deploy/delivery-service | grep lg-3fa9c1d2e8b0
+... courier call failed req=lg-3fa9c1d2e8b0 order=1374 stage=connect ip=<새 IP> elapsed=5.01s err=timed out
+$ oc -n shop logs deploy/order-service | grep lg-3fa9c1d2e8b0
+... delivery tracking failed req=lg-3fa9c1d2e8b0 orderId=1374 status=503 elapsedMs=5017
+$ oc -n shop logs deploy/gateway-service | grep lg-3fa9c1d2e8b0
+... tracking failed req=lg-3fa9c1d2e8b0 order=1374 status=502 elapsedMs=5034
+```
+
+> **eBPF 화면과의 관계**: 이 요청 ID 는 **로그용**입니다. eBPF 는 각 구간(게이트웨이→주문, 주문→배송 …)의
+> 요청 수·지연·오류를 서비스 간 연결선으로 보여주지만, 서비스 여러 개를 거친 **요청 1건을 끝까지 잇는 추적(분산 트레이스)** 은
+> eBPF 만으로 만들지 않습니다 — 이 편의 한계 장표 내용이며, OpenTelemetry 와 함께 쓰는 EP05 에서 다룹니다.
+
 | 구성 요소 | 무엇을 흉내 내나 | 구현 |
 | --- | --- | --- |
-| 다섯 서비스 + MySQL | 쇼핑몰 | `shop` 네임스페이스. 모니터링 코드·에이전트 없음 |
-| `loadgen` | 사용자 트래픽 | 주문 서비스로 주문 생성·배송 조회를 1초 간격으로 호출 |
+| 여덟 서비스 + MySQL + Redis | 쇼핑몰 | `shop` 네임스페이스. 모니터링 코드·에이전트 없음 |
+| `loadgen` | 사용자 트래픽 | 게이트웨이로 체크아웃·배송 조회·둘러보기를 1초 간격으로 호출 |
 | `courier-dns` | 택배사 도메인의 DNS | CoreDNS `hosts` 한 줄. `incident` 가 IP 를 바꿈 |
 | `fw-*` NetworkPolicy | 사내 방화벽 | 배송 서비스의 나가는 연결 허용 목록. 예전 IP 만 허용 |
 | `courier-ext/` | 외부 택배사 API | 클러스터 **밖** 리눅스 호스트의 nginx(HTTPS). 예전 IP·새 IP 양쪽에서 443 응답 |
 
 **장애가 나는 원리**: DNS 가 새 IP 를 돌려주면 배송 서비스가 새 IP 로 TCP 연결을 시도합니다.
 방화벽(NetworkPolicy)이 SYN 을 조용히 버리므로 연결은 5초 뒤 타임아웃되고, 배송 서비스는 주문 서비스에 503,
-주문 서비스는 사용자에게 502 를 돌려줍니다. eBPF 는 이것을 **실패한 TCP 연결(목적지 = 새 IP:443)** 과
-**약 5초 걸린 5xx HTTP 요청**으로 봅니다.
+주문 서비스는 게이트웨이에 502, 게이트웨이는 사용자에게 502 를 돌려줍니다. eBPF 는 이것을
+**실패한 TCP 연결(목적지 = 새 IP:443)** 과 **약 5초 걸린 5xx HTTP 요청**(주문→배송, 게이트웨이→주문 구간)으로 봅니다.
+체크아웃·상품·회원 요청은 배송과 무관하므로 장애 중에도 정상입니다.
 
 ---
 
@@ -139,7 +187,7 @@ flowchart LR
 | OpenShift | **4.12 이상** (RHCOS 커널 5.14 → eBPF 조건 "커널 4.16 이상" 충족) |
 | 네트워크 | 기본 CNI **OVN-Kubernetes** (NetworkPolicy 로 방화벽 차단을 흉내 냄) |
 | 내부 이미지 레지스트리 | 활성화 상태 (`oc get co image-registry` 가 Available). default route 는 5-6 에서 엽니다 |
-| 외부 이미지 pull | 노드가 `docker.io`, `quay.io`, `registry.k8s.io` 에서 pull 가능해야 함 (부하 발생기·DNS·MySQL 이미지). 폐쇄망이면 [12. 문제 해결](#12-문제-해결) 참고 |
+| 외부 이미지 pull | 노드가 `docker.io`, `quay.io`, `registry.k8s.io` 에서 pull 가능해야 함 (부하 발생기·DNS·MySQL·Redis 이미지). 폐쇄망이면 [12. 문제 해결](#12-문제-해결) 참고 |
 | Observ 노드 에이전트 | 설치 완료, **ClickHouse 와 노드 에이전트의 traces endpoint 설정 필수** (없으면 T-Map·트랜잭션 조회가 비어 있음). OpenTelemetry 에이전트·SDK 는 설치하지 않음 |
 | 계정 권한 | **cluster-admin 권장**. 필요 권한: 네임스페이스 생성, 노드 조회(점검), 레지스트리 설정 변경(5-6, 한 번). cluster-admin 이 아니면 5-6 만 관리자에게 요청 |
 
@@ -154,7 +202,7 @@ flowchart LR
 | `bash` 4 이상 | `bash --version` | 기본 설치 |
 
 - 작업 PC 아키텍처와 클러스터 노드 아키텍처가 같아야 빌드가 빠릅니다 (보통 둘 다 x86_64 → `PLATFORM=linux/amd64`).
-- 작업 PC 는 빌드 중 `docker.io`, `gcr.io` 에서 베이스 이미지를 받습니다.
+- 작업 PC 는 빌드 중 베이스 이미지·패키지를 받습니다: `docker.io`, `gcr.io`, `mcr.microsoft.com`(.NET), `repo.maven.apache.org`(Java), `rubygems.org`(Ruby WEBrick), `api.nuget.org`(.NET).
 
 ### 택배사 호스트
 
@@ -232,7 +280,7 @@ COURIER_NEW_IP=10.0.0.62     # 택배사 호스트에 새로 붙일 보조 IP
 | `CONTAINER_ENGINE` | `auto` | `podman` 우선, 없으면 `docker` |
 | `REGISTRY_TLS_VERIFY` | `false` | default route 인증서 검증. OCP 기본 인그레스 인증서는 보통 사설이라 `false` |
 | `PLATFORM` | `linux/amd64` | 클러스터 노드 아키텍처 |
-| `LOADGEN_REPLICAS` | `1` | 부하 발생기 파드 수 (파드 1개 = 초당 주문 1건 + 배송 조회 1건) — [6-1](#6-1-요청량-늘리기) |
+| `LOADGEN_REPLICAS` | `1` | 부하 발생기 파드 수 (파드 1개 = 초당 체크아웃·배송 조회·둘러보기 각 1건) — [6-1](#6-1-요청량-늘리기) |
 | `LOADGEN_*_INTERVAL` | `1` | 파드 하나의 요청 간격(초) |
 
 ### 5-4. 택배사 인증서 만들기 **[작업 PC]**
@@ -437,10 +485,10 @@ curl -sk --resolve api.courier.example:443:10.0.0.62 https://api.courier.example
 ./demo.sh push
 ```
 
-이 명령이 하는 일 (5~15분, 첫 빌드는 베이스 이미지 다운로드로 더 걸림):
+이 명령이 하는 일 (10~25분, 첫 빌드는 베이스 이미지 다운로드로 더 걸림):
 
 1. `shop` 네임스페이스 생성
-2. ImageStream 5개 생성 — `shop-member-service`, `shop-product-service`, `shop-order-service`, `shop-payment-service`, `shop-delivery-service`
+2. ImageStream 8개 생성 — `shop-gateway-service`, `shop-member-service`, `shop-product-service`, `shop-inventory-service`, `shop-order-service`, `shop-payment-service`, `shop-notification-service`, `shop-delivery-service`
 3. `oc whoami -t` 토큰으로 default route 에 로그인 (토큰은 표준입력으로 전달, 명령 인자에 남지 않음)
    `podman login -u <사용자> --password-stdin --tls-verify=false default-route-openshift-image-registry.apps.<도메인>`
 4. 서비스마다 `podman build` → `podman push default-route-…/shop/shop-<서비스>:1.0.0`
@@ -467,15 +515,15 @@ shop-member-service     1.0.0   image-registry.openshift-image-registry.svc:5000
 이 명령이 하는 일:
 
 1. `shop`, `demo-infra` 네임스페이스 (Pod Security `restricted`)
-2. ImageStream 에 이미지 5개가 있는지 확인 — 없으면 "`./demo.sh push` 를 먼저 실행하세요" 로 중단
-3. 시크릿: `courier-ca`(택배사 CA 공개 인증서), `mysql-auth`(**무작위 비밀번호**, 처음 한 번만 생성)
+2. ImageStream 에 이미지 8개가 있는지 확인 — 없으면 "`./demo.sh push` 를 먼저 실행하세요" 로 중단
+3. 시크릿: `courier-ca`(택배사 CA 공개 인증서), `mysql-auth`·`redis-auth`(**무작위 비밀번호**, 처음 한 번만 생성)
 4. `courier-dns` → 택배사 도메인이 **예전 IP** 를 가리킴
-5. MySQL, 다섯 서비스 (이미지: `image-registry.openshift-image-registry.svc:5000/shop/shop-*:<TAG>`)
+5. MySQL, Redis, 여덟 서비스 (이미지: `image-registry.openshift-image-registry.svc:5000/shop/shop-*:<TAG>`)
 6. 방화벽: 배송 서비스는 택배사 DNS 와 **예전 IP:443** 만 나갈 수 있음
 7. 서비스 간 인바운드 격리 정책
 8. 모든 파드 Ready 대기 → 부하 발생기 기동
 
-`배포 완료` 가 나오면 끝입니다. 파드 상태: `oc get pods -n shop` (6개 Running), `oc get pods -n demo-infra` (2개 Running)
+`배포 완료` 가 나오면 끝입니다. 파드 상태: `oc get pods -n shop` (10개 Running: 서비스 8 + MySQL + Redis), `oc get pods -n demo-infra` (2개 Running)
 
 ### 5-10. 확인 **[작업 PC]**
 
@@ -496,16 +544,16 @@ shop-member-service     1.0.0   image-registry.openshift-image-registry.svc:5000
 RULE                          DESCRIPTION
 fw-allow-courier-10-0-0-61    택배사 API (api.courier.example) 10.0.0.61:443 허용
 fw-delivery-default           배송 서비스 egress 기본 규칙: DNS 만 허용, 그 외 차단
-[..] 주문 서비스를 거친 배송 조회 1건
+[..] 게이트웨이 → 주문 → 배송을 거친 배송 조회 1건
   HTTP 200  0.02s
 ```
 
-실시간 트래픽: `./demo.sh traffic` (`201 … POST /api/orders`, `200 … GET …/delivery` 가 1초마다. Ctrl+C 로 종료)
+실시간 트래픽: `./demo.sh traffic` (`201 … POST /api/checkout`, `200 … GET …/tracking`, `200 … GET /api/products|members/…` 가 1초마다. Ctrl+C 로 종료)
 
 ### 5-11. 정상 상태 데이터 쌓기
 
 촬영 전 **몇 시간 이상(가능하면 하루)** 그대로 둡니다. 데모 3에서 조회 기간을 넓혀
-예전 IP 로 정상 연결되던 모습과 비교하는 데 쓰입니다. 이 사이 Observ 화면에서 다섯 서비스가
+예전 IP 로 정상 연결되던 모습과 비교하는 데 쓰입니다. 이 사이 Observ 화면에서 여덟 서비스가
 서비스 목록에 언어 아이콘과 함께 나타나는지 확인해 두세요.
 
 ---
@@ -535,7 +583,9 @@ fw-delivery-default           배송 서비스 egress 기본 규칙: DNS 만 허
 
 ### 6-1. 요청량 늘리기
 
-부하 발생기(`loadgen`) 파드 하나가 **초당 주문 생성 1건 + 배송 조회 1건**을 보냅니다. 파드 수를 늘리면 그만큼 늘어납니다.
+부하 발생기(`loadgen`) 파드 하나가 초당 **체크아웃 1건 + 배송 조회 1건 + 둘러보기 1건**(상품·회원 조회 번갈아)을
+게이트웨이로 보냅니다. 체크아웃 1건은 안에서 서비스 간 호출 8번으로 퍼지므로, 서비스 간 호출은 파드당 초당 약 13건입니다.
+파드 수를 늘리면 그만큼 늘어납니다.
 
 ```bash
 # demo.env 에서 파드 수를 정하고 반영 (재배포해도 이 값이 유지됨)
@@ -546,17 +596,18 @@ sed -i 's/^LOADGEN_REPLICAS=.*/LOADGEN_REPLICAS=3/' demo.env
 oc scale deploy/loadgen -n demo-infra --replicas=3
 ```
 
-| 파드 수 | 주문 생성 | 배송 조회 | 장애 중 주문 서비스가 동시에 붙잡는 요청 |
-| --- | --- | --- | --- |
-| 1 (기본) | 초당 1 | 초당 1 | 약 5 |
-| 3 | 초당 3 | 초당 3 | 약 15 |
-| 5 | 초당 5 | 초당 5 | 약 25 |
-| 10 | 초당 10 | 초당 10 | 약 50 (한계 근처) |
+| 파드 수 | 체크아웃 | 배송 조회 | 둘러보기 | 서비스 간 호출 (대략) | 장애 중 주문 서비스가 동시에 붙잡는 요청 |
+| --- | --- | --- | --- | --- | --- |
+| 1 (기본) | 초당 1 | 초당 1 | 초당 1 | 초당 13 | 약 5 |
+| 3 | 초당 3 | 초당 3 | 초당 3 | 초당 39 | 약 15 |
+| 5 | 초당 5 | 초당 5 | 초당 5 | 초당 65 | 약 25 |
+| 10 | 초당 10 | 초당 10 | 초당 10 | 초당 130 | 약 50 (한계 근처) |
 
 - **배송 조회 합계 초당 10건 이하를 권장합니다.** 장애 중 배송 조회는 주문 서비스의 요청 스레드를 5초씩 붙잡습니다.
-  주문 서비스 스레드 풀이 64개라 이를 넘기면 주문 생성까지 느려져 "배송만 문제"라는 데모 흐름이 흐려집니다.
+  주문 서비스 스레드 풀이 64개라 이를 넘기면 체크아웃까지 느려져 "배송만 문제"라는 데모 흐름이 흐려집니다.
 - **간격(`LOADGEN_*_INTERVAL`)을 0.5초 미만으로 줄이지 마세요.** 장애 중 파드 하나 안에 대기 중인 curl 이 수십 개 쌓여
   메모리 제한(128Mi)을 넘을 수 있습니다. 늘릴 때는 파드 수로 늘립니다.
+- 요청 종류별로 조절하려면 `LOADGEN_ORDER_INTERVAL`(체크아웃), `LOADGEN_TRACKING_INTERVAL`(배송 조회), `LOADGEN_BROWSE_INTERVAL`(둘러보기)을 바꿉니다.
 - 멈추기: `oc scale deploy/loadgen -n demo-infra --replicas=0` / 다시 시작: `--replicas=<원래 값>`
 
 ---
@@ -569,7 +620,7 @@ git pull
 oc login ...               # 세션이 만료됐다면
 ./demo.sh push             # 바뀐 코드로 이미지 다시 빌드·push (같은 TAG 에 덮어씀)
 ./demo.sh deploy           # 매니페스트 변경 반영 (바뀐 게 없으면 그대로)
-./demo.sh restart          # 다섯 서비스 재시작 → 새 이미지 pull (imagePullPolicy: Always)
+./demo.sh restart          # 여덟 서비스 재시작 → 새 이미지 pull (imagePullPolicy: Always)
 ./demo.sh status
 ```
 
@@ -600,7 +651,7 @@ oc login ...               # 세션이 만료됐다면
 | `fix` | 방화벽에 새 IP 허용 | `scripts/scenario.sh fix` |
 | `reset` / `baseline` | 새 IP 규칙 삭제, DNS 를 예전 IP 로 | `scripts/scenario.sh reset` |
 | `traffic` | 부하 발생기 로그 실시간 | `scripts/scenario.sh traffic` |
-| `restart` | 다섯 서비스 재시작 | `demo.sh` |
+| `restart` | 여덟 서비스 재시작 | `demo.sh` |
 | `images` | ImageStream·태그·pull 주소 | `demo.sh` |
 | `cleanup` | `shop`, `demo-infra` 삭제 (ImageStream 포함, 확인 질문 있음) | `scripts/cleanup.sh` |
 | `local-up` 등 | 로컬 스모크 테스트 ([14. 부록](#14-부록)) | `demo.sh` |
@@ -644,8 +695,8 @@ OCP 내부 레지스트리는 **push 하는 주소와 pull 하는 주소가 다�
 | ClickHouse 와 노드 에이전트의 traces endpoint 설정 | 없으면 T-Map·트랜잭션 조회가 비어 있음 | Observ 설치 측 설정 (이 저장소 밖) |
 | 택배사 도메인은 IP **1개**만 돌려준다 | 여러 개면 실패 목적지가 `도메인:443` 으로 합쳐져 새 IP 가 안 보임 | `k8s/40-courier-dns.yaml` — `hosts` 한 줄, `scenario.sh` 가 항상 한 줄로 교체 |
 | 배송 서비스는 택배사 호출에 **5초 타임아웃**, 실패하면 **5xx** | 커널 기본 재시도에 맡기면 약 127초 뒤에야 실패 1건 기록 | `delivery-service/app.py` — `COURIER_TIMEOUT_SECONDS=5`, 실패 시 503 |
-| 배송 서비스는 **주문 서비스가 호출**한다 | 브라우저가 직접 호출하면 오류·지연이 집계되지 않음 | loadgen → 주문 → 배송. 주문의 배송 호출 타임아웃은 10초로 더 길게 |
-| 외부 HTTPS 호출은 **Python(시스템 libssl)** 이 맡는다 | Java(JSSE)·Node.js(OpenSSL 정적 링크)의 HTTPS 내용은 eBPF 로 볼 수 없음 | `python:3.12-slim` — `_ssl` 이 `libssl.so.3` 동적 링크 |
+| 배송 서비스는 **주문 서비스가 호출**한다 | 브라우저가 직접 호출하면 오류·지연이 집계되지 않음 | loadgen → 게이트웨이 → 주문 → 배송. 타임아웃은 바깥쪽일수록 길게 (배송→택배사 5초 < 주문→배송 10초 < 게이트웨이→주문 15초 < loadgen 20초) |
+| 외부 HTTPS 호출은 **Python(시스템 libssl)** 이 맡는다 (다른 서비스는 외부 호출 없음) | Java(JSSE)·Node.js(OpenSSL 정적 링크)의 HTTPS 내용은 eBPF 로 볼 수 없음 | `python:3.12-slim` — `_ssl` 이 `libssl.so.3` 동적 링크 |
 | Go 서비스는 **Go 1.17 이상, 심볼 유지** 빌드 | 그래야 언어가 Go 로 표시됨 | Go 1.22, `-ldflags "-s -w"` 미사용 |
 | 방화벽 차단 전 **정상 상태 데이터**를 미리 쌓아 둔다 | 예전 IP 로 연결되던 모습과 비교 | `deploy` 직후가 정상 상태. 몇 시간 이상 유지 |
 
@@ -655,7 +706,8 @@ OCP 내부 레지스트리는 **push 하는 주소와 pull 하는 주소가 다�
 - **매 요청 DNS 조회**: TTL 5초 + Python 은 DNS 를 캐시하지 않음 → DNS 탭에 택배사 도메인 조회가 꾸준히 보입니다.
 - **평문 서비스 간 통신**: 서비스 간 HTTP/1.1 평문, MySQL `useSSL=false` → SLO Client 표·MySQL 탭에 프로토콜이 구분되어 나옵니다.
 - **프로브 잡음 제거**: readinessProbe 는 `tcpSocket` → kubelet 의 HTTP 헬스체크가 지표에 섞이지 않습니다.
-- **데모 장치 분리**: 부하 발생기·택배사 DNS 는 `demo-infra` → `shop` 으로 필터하면 다섯 서비스(+MySQL)만 보입니다.
+- **데모 장치 분리**: 부하 발생기·택배사 DNS 는 `demo-infra` → `shop` 으로 필터하면 여덟 서비스(+MySQL·Redis)만 보입니다.
+- **평문 Redis**: 재고 서비스는 외부 라이브러리 없이 RESP 로 Redis 와 평문 통신 → Redis 명령이 보입니다.
 - **확실한 드롭**: 차단은 거부(RST)가 아니라 SYN drop → "연결 실패(타임아웃)"로 기록되고 배송 서비스 요청은 약 5초에 끝납니다.
 
 ### eBPF 로 보이지 않는 것 (대본 주의)
@@ -682,7 +734,7 @@ OCP 내부 레지스트리는 **push 하는 주소와 pull 하는 주소가 다�
 | 실행 사용자 | 이미지 USER 는 숫자(비 root). 매니페스트에 `runAsUser` 를 **지정하지 않아** OCP 가 임의 UID(그룹 0) 부여 |
 | 컨테이너 설정 | `runAsNonRoot`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, `seccompProfile: RuntimeDefault` |
 | capability 예외 | `courier-dns` 만 `NET_BIND_SERVICE` 추가 — coredns 1.11+ 바이너리에 파일 capability 가 붙어 있어 없으면 `exec /coredns: operation not permitted`. restricted-v2 가 허용하는 유일한 추가 capability |
-| 파일시스템 | `readOnlyRootFilesystem: true` (MySQL 제외 — 기동 시 설정 파일 생성). JVM `/tmp` 만 emptyDir |
+| 파일시스템 | `readOnlyRootFilesystem: true` (MySQL·Redis 제외 — 기동 시 설정 파일 생성). 런타임 임시파일용 `/tmp` 만 emptyDir |
 | ServiceAccount | `automountServiceAccountToken: false` |
 | MySQL 이미지 | 공식 `mysql:8.0` 은 restricted-v2 에서 기동 불가 → OCP 용 `quay.io/sclorg/mysql-80-c9s` (Red Hat 구독이 있으면 `registry.redhat.io/rhel9/mysql-80` 으로 교체 가능, 환경변수 동일) |
 | 이미지 이름 | 모두 전체 경로(`docker.io/library/…`). RHEL podman·CRI-O 의 짧은 이름 해석 실패 방지 |
@@ -691,7 +743,7 @@ OCP 내부 레지스트리는 **push 하는 주소와 pull 하는 주소가 다�
 
 | 항목 | 처리 |
 | --- | --- |
-| MySQL 비밀번호 | git 에 없음. `deploy` 최초 실행 시 무작위 생성해 `mysql-auth` 시크릿에 저장 (재배포 시 유지) |
+| MySQL·Redis 비밀번호 | git 에 없음. `deploy` 최초 실행 시 무작위 생성해 `mysql-auth`·`redis-auth` 시크릿에 저장 (재배포 시 유지) |
 | 레지스트리 토큰 | `oc whoami -t` 를 표준입력으로 `podman login` 에 전달 — 명령 인자·셸 기록에 남지 않음 |
 | 택배사 인증서 | `courier-ext/certs/` 는 `.gitignore`, 개인키 600. 클러스터에는 공개 CA(`ca.crt`)만 올림 |
 | TLS 검증 | 배송 서비스는 **fail-closed** — CA 가 없으면 기동하지 않음 (`COURIER_TLS_INSECURE=true` 명시 시에만 검증 생략). TLS 1.2 이상 |
@@ -704,9 +756,14 @@ OCP 내부 레지스트리는 **push 하는 주소와 pull 하는 주소가 다�
 | `fw-delivery-default` | egress | 배송 → `courier-dns` (1053/UDP·TCP) **만** |
 | `fw-allow-courier-<예전IP>` | egress | 배송 → 택배사 예전 IP 443 |
 | `default-deny-ingress` | ingress | `shop`, `demo-infra` 기본 차단 |
-| `allow-order-from-loadgen` | ingress | loadgen → 주문 8080 |
-| `allow-backends-from-order` | ingress | 주문 → 회원·상품·결제·배송 8080 |
+| `allow-gateway-from-loadgen` | ingress | loadgen → 게이트웨이 8080 |
+| `allow-order-from-gateway` | ingress | 게이트웨이 → 주문 8080 |
+| `allow-product-from-gateway` | ingress | 게이트웨이 → 상품 8080 |
+| `allow-member-from-callers` | ingress | 게이트웨이·주문·결제·알림 → 회원 8080 |
+| `allow-inventory-from-callers` | ingress | 상품·주문 → 재고 8080 |
+| `allow-order-backends-from-order` | ingress | 주문 → 결제·알림·배송 8080 |
 | `allow-mysql-from-member` | ingress | 회원 → MySQL 3306 |
+| `allow-redis-from-inventory` | ingress | 재고 → Redis 6379 |
 | `allow-courier-dns-from-delivery` | ingress | 배송 → courier-dns 1053 |
 
 - 인바운드 격리(`demo.observ/policy=isolation`)는 방화벽 장면 규칙(`demo.observ/firewall=egress`)과 라벨이 달라 `firewall` 화면에 나오지 않습니다.
@@ -717,7 +774,7 @@ OCP 내부 레지스트리는 **push 하는 주소와 pull 하는 주소가 다�
 | 항목 | 이유 | 운영 환경이라면 |
 | --- | --- | --- |
 | 서비스 간 HTTP 평문 | eBPF 가 L7 프로토콜을 구분하는 장면 | mTLS (Service Mesh 등) |
-| MySQL `useSSL=false` | MySQL 탭에서 쿼리 표시 | TLS 필수 |
+| MySQL `useSSL=false`, Redis 평문 | MySQL 탭·Redis 명령 표시 | TLS 필수 |
 | MySQL `emptyDir` | 데모용 휘발 데이터 | PVC + 백업 |
 | `REGISTRY_TLS_VERIFY=false` | OCP 기본 인그레스 인증서가 사설인 경우가 많음 | 인그레스 CA 를 작업 PC 에 신뢰 등록 후 `true` |
 
@@ -746,6 +803,9 @@ oc adm policy add-scc-to-user privileged -z <agent-serviceaccount> -n <agent-nam
 | push 중 `x509: certificate signed by unknown authority` | `demo.env` 의 `REGISTRY_TLS_VERIFY=false` 확인 |
 | push 중 `no such host` (route 주소) | 작업 PC 가 `*.apps.<도메인>` 을 해석하지 못함 → DNS 또는 `/etc/hosts` 에 route 주소 → 인그레스(라우터) IP 등록 |
 | 빌드 중 `toomanyrequests` | Docker Hub pull 한도 → `podman login docker.io` 후 다시 |
+| gateway 빌드 중 `NU1301` / `Unable to load the service index` | 작업 PC 가 `api.nuget.org` 에 접속 불가 (프록시 설정 확인) |
+| inventory 빌드 중 `Could not find a valid gem 'webrick'` | 작업 PC 가 `rubygems.org` 에 접속 불가 (프록시 설정 확인) |
+| 재고 서비스 로그 `redis error … NOAUTH` / `WRONGPASS` | `redis-auth` 시크릿과 Redis 비밀번호 불일치 → `oc -n shop rollout restart deploy/redis deploy/inventory-service` |
 | 빌드 중 `short-name resolution enforced` | Dockerfile `FROM` 은 전체 경로여야 함 (현재 모두 전체 경로. 직접 수정했다면 확인) |
 | `deploy` 가 `ImageStream 에 없습니다` 로 중단 | `./demo.sh push` 먼저. `./demo.sh images` 로 태그 확인. `demo.env` 의 `TAG` 가 push 때와 같은지 |
 | 파드 `ImagePullBackOff` (shop-* 이미지) | `oc -n shop get istag`, `oc -n shop describe pod <pod>`. push 한 네임스페이스가 `shop` 인지 |
@@ -771,15 +831,17 @@ oc adm policy add-scc-to-user privileged -z <agent-serviceaccount> -n <agent-nam
 
 ### 폐쇄망 (노드가 인터넷 이미지를 못 받을 때)
 
-부하 발생기·DNS·MySQL 이미지 3개를 내부 레지스트리로 가져온 뒤 매니페스트 이미지를 바꿉니다:
+부하 발생기·DNS·MySQL·Redis 이미지 4개를 내부 레지스트리로 가져온 뒤 매니페스트 이미지를 바꿉니다:
 
 ```bash
 oc -n demo-infra import-image curl:8.10.1   --from=docker.io/curlimages/curl:8.10.1 --confirm
 oc -n demo-infra import-image coredns:v1.11.3 --from=registry.k8s.io/coredns/coredns:v1.11.3 --confirm
 oc -n shop       import-image mysql-80:c9s   --from=quay.io/sclorg/mysql-80-c9s:c9s --confirm
+oc -n shop       import-image redis-7:c9s    --from=quay.io/sclorg/redis-7-c9s:c9s --confirm
 # k8s/60-loadgen.yaml    image: image-registry.openshift-image-registry.svc:5000/demo-infra/curl:8.10.1
 # k8s/40-courier-dns.yaml image: image-registry.openshift-image-registry.svc:5000/demo-infra/coredns:v1.11.3
 # k8s/10-mysql.yaml      image: image-registry.openshift-image-registry.svc:5000/shop/mysql-80:c9s
+# k8s/15-redis.yaml      image: image-registry.openshift-image-registry.svc:5000/shop/redis-7:c9s
 ```
 
 (`import-image` 는 클러스터가 원본 레지스트리에 접근할 수 있거나 미러가 설정돼 있어야 합니다. 완전 폐쇄망이면 `oc image mirror` 로 옮깁니다.)
@@ -820,16 +882,20 @@ sudo ./setup-ips.sh del <NIC> <COURIER_NEW_IP>/<prefix>
 ├── demo.sh                   모든 명령의 진입점
 ├── demo.env.example          설정 예시 (→ demo.env 로 복사)
 ├── services/
+│   ├── gateway-service/      C# .NET 8 (minimal API) — 입구
 │   ├── member-service/       Java 21 + MySQL (JDBC, useSSL=false)
-│   ├── product-service/      Go 1.22 (심볼 유지 빌드)
-│   ├── order-service/        Java 21 (java.net.http, HTTP/1.1 고정)
-│   ├── payment-service/      Node.js 20 (node:http, 의존성 없음)
-│   └── delivery-service/     Python 3.12 (표준 라이브러리만, 시스템 libssl)
+│   ├── product-service/      Go 1.22 (심볼 유지 빌드) → 재고
+│   ├── inventory-service/    Ruby 3.3 (WEBrick) + Redis (RESP 직접 구현)
+│   ├── order-service/        Java 21 (java.net.http, HTTP/1.1 고정) → 회원·재고·결제·알림·배송
+│   ├── payment-service/      Node.js 20 (node:http, 의존성 없음) → 회원
+│   ├── notification-service/ PHP 8.3 (내장 웹서버) → 회원
+│   └── delivery-service/     Python 3.12 (표준 라이브러리만, 시스템 libssl) → 외부 택배사
 ├── courier-ext/              택배사 호스트용: run.sh(nginx 기동), setup-ips.sh(보조 IP), gen-certs.sh
 ├── k8s/                      매니페스트 (__PLACEHOLDER__ 는 scripts 가 채움)
 │   ├── 00-namespaces.yaml
 │   ├── 10-mysql.yaml
-│   ├── 20-services.yaml      회원·상품·주문·결제
+│   ├── 15-redis.yaml
+│   ├── 20-services.yaml      게이트웨이·회원·상품·재고·주문·결제·알림
 │   ├── 30-delivery.yaml      배송 (택배사 전용 DNS 사용)
 │   ├── 40-courier-dns.yaml
 │   ├── 50-firewall.yaml      방화벽 (데모 장면용 egress)
@@ -848,14 +914,16 @@ capability 전부 제거, 권한 상승 금지)으로 뜹니다.
 
 ```bash
 ./demo.sh local-up
-curl -s -X POST -H 'Content-Type: application/json' -d '{"memberId":7,"productId":3}' localhost:8080/api/orders
-# {"orderId":1001,"memberId":7,"productId":3,"amount":4000}
-curl -s localhost:8080/api/orders/1001/delivery
+curl -s localhost:8080/api/products/3
+# {"id":3,"name":"product-03","price":4000,"stock":1000}
+curl -s -X POST -H 'Content-Type: application/json' -d '{"memberId":10,"productId":3,"qty":2}' localhost:8080/api/checkout
+# {"orderId":1001,"memberId":10,"productId":3,"qty":2,"amount":8000}
+curl -s localhost:8080/api/orders/1001/tracking
 # {"orderId": "1001", "tracking": {..., "served_by": "172.28.0.100"}}
 
 ./demo.sh local-fail      # 택배사 IP 를 응답 없는 주소로
-curl -s -w ' %{http_code} %{time_total}s\n' localhost:8080/api/orders/1001/delivery
-# {"error":"delivery-service returned 503","orderId":1001} 502 5.04s
+curl -s -w ' %{http_code} %{time_total}s\n' localhost:8080/api/orders/1001/tracking
+# {"error":"order-service returned 502"} 502 5.04s
 
 ./demo.sh local-heal
 ./demo.sh local-down

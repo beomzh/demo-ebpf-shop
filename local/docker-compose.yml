@@ -1,8 +1,8 @@
 # 로컬 스모크 테스트용 (eBPF·쿠버네티스 없이 앱 코드와 호출 흐름만 확인)
 #   ./demo.sh local-up        (docker compose / podman compose 자동 선택)
-#   curl -s localhost:8080/api/orders/1001/delivery          # 정상: 200
+#   curl -s localhost:8080/api/orders/1001/tracking          # 정상: 200
 #   ./demo.sh local-fail
-#   curl -s -w ' %{http_code} %{time_total}s\n' localhost:8080/api/orders/1001/delivery   # 장애: 약 5초 뒤 502
+#   curl -s -w ' %{http_code} %{time_total}s\n' localhost:8080/api/orders/1001/tracking   # 장애: 약 5초 뒤 502
 name: shop-local
 
 # 앱 컨테이너는 OpenShift restricted-v2 SCC 와 같은 조건으로 띄운다:
@@ -33,6 +33,22 @@ services:
       MYSQL_USER: shop
       MYSQL_PASSWORD: local-only
 
+  redis:
+    <<: *common
+    image: quay.io/sclorg/redis-7-c9s:c9s    # 클러스터와 같은 OpenShift 용 이미지
+    platform: linux/amd64
+    user: "${LOCAL_UID:-1000680000}:0"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      REDIS_PASSWORD: local-only
+
+  gateway-service:
+    <<: [*common, *ocp-restricted]
+    build: ../services/gateway-service
+    ports: ["8080:8080"]
+    depends_on: [product-service, member-service, order-service]
+
   member-service:
     <<: [*common, *ocp-restricted]
     build: ../services/member-service
@@ -45,10 +61,30 @@ services:
   product-service:
     <<: [*common, *ocp-restricted]
     build: ../services/product-service
+    depends_on: [inventory-service]
+
+  inventory-service:
+    <<: [*common, *ocp-restricted]
+    build: ../services/inventory-service
+    environment:
+      REDIS_HOST: redis
+      REDIS_PASSWORD: local-only
+    depends_on: [redis]
+
+  order-service:
+    <<: [*common, *ocp-restricted]
+    build: ../services/order-service
+    depends_on: [member-service, inventory-service, payment-service, notification-service, delivery-service]
 
   payment-service:
     <<: [*common, *ocp-restricted]
     build: ../services/payment-service
+    depends_on: [member-service]
+
+  notification-service:
+    <<: [*common, *ocp-restricted]
+    build: ../services/notification-service
+    depends_on: [member-service]
 
   delivery-service:
     <<: [*common, *ocp-restricted]
@@ -62,12 +98,6 @@ services:
       - "api.courier.example:${COURIER_IP:-172.28.0.100}"
     volumes:
       - ../courier-ext/certs/ca.crt:/etc/courier-ca/ca.crt:ro,Z
-
-  order-service:
-    <<: [*common, *ocp-restricted]
-    build: ../services/order-service
-    ports: ["8080:8080"]
-    depends_on: [member-service, product-service, payment-service, delivery-service]
 
   courier-api:
     image: docker.io/library/nginx:1.27-alpine

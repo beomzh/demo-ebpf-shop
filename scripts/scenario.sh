@@ -76,10 +76,10 @@ except OSError as e:
   info "방화벽 규칙"
   show_firewall
 
-  info "주문 서비스를 거친 배송 조회 1건"
+  info "게이트웨이 → 주문 → 배송을 거친 배송 조회 1건"
   kc -n "$INFRA_NS" exec deploy/loadgen -- \
-    curl -s -m 15 -o /dev/null -w '  HTTP %{http_code}  %{time_total}s\n' \
-    "http://order-service.${APP_NS}.svc.cluster.local:8080/api/orders/1001/delivery" || true
+    curl -s -m 20 -o /dev/null -H 'X-Request-Id: status-check' -w '  HTTP %{http_code}  %{time_total}s\n' \
+    "http://gateway-service.${APP_NS}.svc.cluster.local:8080/api/orders/1001/tracking" || true
 }
 
 case "${1:-}" in

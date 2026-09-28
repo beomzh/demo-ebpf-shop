@@ -1,6 +1,6 @@
 """배송 서비스 (Python) — 모니터링이 전혀 없는 서비스.
 
-주문 서비스가 GET /deliveries/{orderId}/tracking 을 호출하면
+주문 서비스가 GET /deliveries/{orderId}/tracking 을 호출하면 (게이트웨이 → 주문 → 배송)
 외부 택배사 API(HTTPS)를 호출해 배송 상태를 돌려준다.
 
 데모 조건 (README "데모 환경 조건" 참고):
@@ -125,6 +125,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         order_id = m.group(1)
+        req_id = self.headers.get("X-Request-Id", "-")
         tracking_no = tracking_no_for(order_id)
         started = time.monotonic()
         try:
@@ -132,14 +133,14 @@ class Handler(BaseHTTPRequestHandler):
         except CourierError as e:
             elapsed = time.monotonic() - started
             log.warning(
-                "courier call failed order=%s tracking=%s stage=%s host=%s ip=%s elapsed=%.2fs err=%s",
-                order_id, tracking_no, e.stage, COURIER_HOST, e.ip, elapsed, e.__cause__,
+                "courier call failed req=%s order=%s tracking=%s stage=%s host=%s ip=%s elapsed=%.2fs err=%s",
+                req_id, order_id, tracking_no, e.stage, COURIER_HOST, e.ip, elapsed, e.__cause__,
             )
             self._send(503, {"error": "courier unavailable", "orderId": order_id})
             return
 
         elapsed = time.monotonic() - started
-        log.info("tracking ok order=%s tracking=%s elapsed=%.3fs", order_id, tracking_no, elapsed)
+        log.info("tracking ok req=%s order=%s tracking=%s elapsed=%.3fs", req_id, order_id, tracking_no, elapsed)
         self._send(200, {"orderId": order_id, "tracking": data})
 
 

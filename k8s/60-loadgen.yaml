@@ -1,5 +1,6 @@
-# 부하 발생기 — "쇼핑몰 프런트"를 흉내 내어 주문 서비스만 호출한다.
-# (배송 서비스를 직접 호출하지 않는다: 모니터링 대상인 주문 서비스를 거쳐야 오류·지연이 집계된다)
+# 부하 발생기 — 쇼핑몰 사용자를 흉내 내어 게이트웨이만 호출한다 (데모 장치, demo-infra 네임스페이스).
+# 게이트웨이부터는 모든 서비스가 요청을 받고 다음 서비스를 호출한다.
+# (배송 서비스를 직접 호출하지 않는다: 게이트웨이 → 주문 → 배송을 거쳐야 오류·지연이 서비스 사이에서 집계된다)
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -8,40 +9,60 @@ metadata:
 data:
   loadgen.sh: |
     #!/bin/sh
-    # 주문 생성(회원·상품·결제)과 배송 조회를 각각 일정 간격으로 보낸다.
+    # 세 종류 요청을 각각 일정 간격으로 보낸다. 요청마다 X-Request-Id 를 붙여 서비스 로그에서 이어 볼 수 있게 한다.
+    #   체크아웃   POST /api/checkout              게이트웨이 → 상품 → 재고 / 주문 → 회원·재고·결제·알림
+    #   배송 조회  GET  /api/orders/{id}/tracking  게이트웨이 → 주문 → 배송 → 외부 택배사
+    #   둘러보기   GET  /api/products/{id}, /api/members/{id}  (번갈아)
     # 배송 조회는 장애 시 5초씩 걸리므로 백그라운드로 보내 간격을 유지한다.
-    ORDER_URL="${ORDER_URL:-http://order-service.shop.svc.cluster.local:8080}"
+    GATEWAY_URL="${GATEWAY_URL:-http://gateway-service.shop.svc.cluster.local:8080}"
     ORDER_INTERVAL="${ORDER_INTERVAL:-1}"
     TRACKING_INTERVAL="${TRACKING_INTERVAL:-1}"
+    BROWSE_INTERVAL="${BROWSE_INTERVAL:-1}"
 
     rnd() { echo $(( $(od -An -N2 -tu2 /dev/urandom | tr -d ' ') % $1 + 1 )); }
+    reqid() { echo "lg-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"; }
 
-    # req <로그용 라벨> <curl 인자...>  →  "시각 상태코드 소요시간 라벨"
+    # req <로그용 라벨> <curl 인자...>  →  "시각 상태코드 소요시간 요청ID 라벨"
     req() {
       label="$1"; shift
-      out=$(curl -s -o /dev/null -m 15 -w '%{http_code} %{time_total}s' "$@" 2>/dev/null) || out="000 -"
-      echo "$(date +%H:%M:%S) $out $label"
+      rid="$(reqid)"
+      out=$(curl -s -o /dev/null -m 20 -H "X-Request-Id: $rid" -w '%{http_code} %{time_total}s' "$@" 2>/dev/null) || out="000 -"
+      echo "$(date +%H:%M:%S) $out $rid $label"
     }
 
-    create_orders() {
+    checkout() {
       while true; do
-        req "POST /api/orders" -X POST -H 'Content-Type: application/json' \
-          -d "{\"memberId\":$(rnd 100),\"productId\":$(rnd 20)}" "$ORDER_URL/api/orders"
+        req "POST /api/checkout" -X POST -H 'Content-Type: application/json' \
+          -d "{\"memberId\":$(rnd 100),\"productId\":$(rnd 20),\"qty\":$(rnd 3)}" "$GATEWAY_URL/api/checkout"
         sleep "$ORDER_INTERVAL"
       done
     }
 
-    track_deliveries() {
+    tracking() {
       while true; do
         id=$((1000 + $(rnd 500)))
-        req "GET /api/orders/$id/delivery" "$ORDER_URL/api/orders/$id/delivery" &
+        req "GET /api/orders/$id/tracking" "$GATEWAY_URL/api/orders/$id/tracking" &
         sleep "$TRACKING_INTERVAL"
       done
     }
 
-    echo "loadgen start target=$ORDER_URL order_interval=${ORDER_INTERVAL}s tracking_interval=${TRACKING_INTERVAL}s"
-    create_orders &
-    track_deliveries &
+    browse() {
+      n=0
+      while true; do
+        n=$((n + 1))
+        if [ $((n % 2)) -eq 0 ]; then
+          id=$(rnd 20);  req "GET /api/products/$id" "$GATEWAY_URL/api/products/$id"
+        else
+          id=$(rnd 100); req "GET /api/members/$id" "$GATEWAY_URL/api/members/$id"
+        fi
+        sleep "$BROWSE_INTERVAL"
+      done
+    }
+
+    echo "loadgen start target=$GATEWAY_URL checkout=${ORDER_INTERVAL}s tracking=${TRACKING_INTERVAL}s browse=${BROWSE_INTERVAL}s"
+    checkout &
+    tracking &
+    browse &
     wait
 ---
 apiVersion: apps/v1
@@ -51,7 +72,7 @@ metadata:
   namespace: demo-infra
   labels: { app: loadgen }
 spec:
-  # 파드 1개 = 초당 주문 생성 1건 + 배송 조회 1건 (간격 1초 기준). 늘리려면 demo.env 의 LOADGEN_REPLICAS
+  # 파드 1개 = 초당 체크아웃 1건 + 배송 조회 1건 + 둘러보기 1건 (간격 1초 기준). 늘리려면 demo.env 의 LOADGEN_REPLICAS
   replicas: __LOADGEN_REPLICAS__
   selector:
     matchLabels: { app: loadgen }
@@ -68,9 +89,10 @@ spec:
           image: docker.io/curlimages/curl:8.10.1
           command: ["/bin/sh", "/scripts/loadgen.sh"]
           env:
-            - { name: ORDER_URL, value: "http://order-service.shop.svc.cluster.local:8080" }
+            - { name: GATEWAY_URL, value: "http://gateway-service.shop.svc.cluster.local:8080" }
             - { name: ORDER_INTERVAL, value: "__LOADGEN_ORDER_INTERVAL__" }
             - { name: TRACKING_INTERVAL, value: "__LOADGEN_TRACKING_INTERVAL__" }
+            - { name: BROWSE_INTERVAL, value: "__LOADGEN_BROWSE_INTERVAL__" }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

@@ -17,7 +17,7 @@ import java.util.concurrent.Executors;
 import java.util.logging.Logger;
 
 /**
- * 회원 서비스 (Java + MySQL).
+ * 회원 서비스 (Java + MySQL) — 게이트웨이·주문·결제·알림 서비스가 호출한다.
  * MySQL 은 평문(useSSL=false)으로 연결해 eBPF 가 쿼리를 볼 수 있게 한다.
  */
 public class MemberApp {
@@ -45,6 +45,7 @@ public class MemberApp {
     }
 
     private static void getMember(HttpExchange ex) throws IOException {
+        String reqId = ex.getRequestHeaders().getFirst("X-Request-Id");
         long id;
         try {
             id = Long.parseLong(ex.getRequestURI().getPath().substring("/members/".length()));
@@ -67,7 +68,7 @@ public class MemberApp {
                 ps.close();
             }
         } catch (SQLException e) {
-            log.warning("member query failed id=" + id + " err=" + e.getMessage());
+            log.warning("member query failed req=" + reqId + " id=" + id + " err=" + e.getMessage());
             resetConn();
             send(ex, 500, "{\"error\":\"db error\"}");
         }

@@ -1,10 +1,13 @@
 # 서비스 간 인바운드(ingress) 격리 — 필요한 호출 경로만 연다.
 # (데모 사건과 무관한 보안 기본값. "방화벽" 장면에서 보여주는 egress 규칙과는 라벨로 구분한다)
 #
-#   demo-infra/loadgen ──▶ order ──▶ member ──▶ mysql
-#                               ├──▶ product
-#                               ├──▶ payment
-#                               └──▶ delivery ──▶ demo-infra/courier-dns
+#   demo-infra/loadgen → gateway ─┬→ product → inventory → redis
+#                                 ├→ member → mysql
+#                                 └→ order ─┬→ member
+#                                           ├→ inventory
+#                                           ├→ payment → member
+#                                           ├→ notification → member
+#                                           └→ delivery → demo-infra/courier-dns (+ 외부 택배사)
 #
 # eBPF 노드 에이전트는 커널에서 관찰하므로 이 정책과 무관하게 수집된다.
 # kubelet 의 tcpSocket 프로브는 노드에서 오는 트래픽으로, OVN-Kubernetes·Calico 모두 허용한다.
@@ -21,12 +24,12 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-order-from-loadgen
+  name: allow-gateway-from-loadgen
   namespace: shop
   labels: { demo.observ/policy: isolation }
 spec:
   podSelector:
-    matchLabels: { app: order-service }
+    matchLabels: { app: gateway-service }
   policyTypes: [Ingress]
   ingress:
     - from:
@@ -40,7 +43,81 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-backends-from-order
+  name: allow-order-from-gateway
+  namespace: shop
+  labels: { demo.observ/policy: isolation }
+spec:
+  podSelector:
+    matchLabels: { app: order-service }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: gateway-service }
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-product-from-gateway
+  namespace: shop
+  labels: { demo.observ/policy: isolation }
+spec:
+  podSelector:
+    matchLabels: { app: product-service }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: gateway-service }
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-member-from-callers
+  namespace: shop
+  labels: { demo.observ/policy: isolation }
+spec:
+  podSelector:
+    matchLabels: { app: member-service }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [gateway-service, order-service, payment-service, notification-service]
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-inventory-from-callers
+  namespace: shop
+  labels: { demo.observ/policy: isolation }
+spec:
+  podSelector:
+    matchLabels: { app: inventory-service }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [product-service, order-service]
+      ports:
+        - { protocol: TCP, port: 8080 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-order-backends-from-order
   namespace: shop
   labels: { demo.observ/policy: isolation }
 spec:
@@ -48,7 +125,7 @@ spec:
     matchExpressions:
       - key: app
         operator: In
-        values: [member-service, product-service, payment-service, delivery-service]
+        values: [payment-service, notification-service, delivery-service]
   policyTypes: [Ingress]
   ingress:
     - from:
@@ -73,6 +150,23 @@ spec:
             matchLabels: { app: member-service }
       ports:
         - { protocol: TCP, port: 3306 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-redis-from-inventory
+  namespace: shop
+  labels: { demo.observ/policy: isolation }
+spec:
+  podSelector:
+    matchLabels: { app: redis }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: inventory-service }
+      ports:
+        - { protocol: TCP, port: 6379 }
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
