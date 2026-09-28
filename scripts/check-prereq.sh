@@ -56,21 +56,28 @@ done
 
 # 실패 메시지를 보고 원인을 추정한다
 probe_hint() {
+  # curl 자체의 실패를 먼저 판별한다 (curl 이 실패하면 점검 파드도 Error 로 끝나므로, 파드 문제로 오판하지 않게)
   case "$1" in
     *"violates PodSecurity"*)
       echo "점검 파드가 Pod Security 정책에 막힘 → 스크립트를 최신으로 (git pull)" ;;
-    *"timed out waiting"*|*ImagePull*|*ErrImage*|*"pod default/"*)
-      echo "테스트 파드가 뜨지 못함 → 노드가 docker.io 이미지를 받을 수 있는지 확인 (README 12. 폐쇄망)" ;;
-    *"Connection timed out"*|*"Operation timed out"*|*"timed out after"*)
+    *"Connection timed out"*|*"Operation timed out"*|*"timed out after"*|*"Timeout was reached"*)
       echo "응답 없음(타임아웃) → IP 오타, 택배사 호스트에 IP 가 붙어 있는지, 경로상 방화벽·라우팅 확인" ;;
-    *"Connection refused"*|*"연결이 거부됨"*)
-      echo "연결 거부 → IP 는 살아 있지만 443 에서 nginx 가 안 떠 있음 (택배사 호스트: sudo ./run.sh status)" ;;
+    *"Connection refused"*|*"연결이 거부됨"*|*"Could not connect to server"*)
+      echo "연결 거부 → 그 IP 까지는 닿지만 443 에서 nginx 가 안 떠 있음 (택배사 호스트: ./courier-ext/run.sh up / status)" ;;
     *"No route to host"*|*"Network is unreachable"*|*"Host is unreachable"*)
       echo "경로 없음 → 노드에서 해당 IP 대역으로 라우팅이 되는지 확인" ;;
     *"HTTP 404"*|*"HTTP 5"*)
-      echo "다른 웹서버가 응답함 → 그 IP 의 443 을 택배사 nginx 가 쓰고 있는지 확인" ;;
+      echo "다른 웹서버가 응답함 → 그 IP:443 이 이 데모의 nginx 가 아님. PG_IP 는 nginx 가 듣는 IP(비우면 COURIER_OLD_IP)여야 함" ;;
+    *"timed out waiting"*|*ImagePull*|*ErrImage*)
+      echo "테스트 파드가 뜨지 못함 → 노드가 docker.io 이미지를 받을 수 있는지 확인 (README 12. 폐쇄망)" ;;
     *) echo "위 메시지를 확인하세요" ;;
   esac
+}
+
+# 점검 파드 출력에서 kubectl 의 부가 메시지를 지운다 (파드 종료 알림, attach 경고)
+clean_probe() {
+  printf '%s' "$1" | grep -vE "^pod .* (deleted|terminated)|couldn't attach to pod" \
+    | sed -E 's/pod [a-z-]+\/[a-z0-9-]+ terminated \(Error\)//g' | tr '\n' ' ' | sed 's/  */ /g; s/ $//'
 }
 
 # 4-a) 작업 PC(클러스터 밖)에서
@@ -93,7 +100,7 @@ for ip in "$COURIER_OLD_IP" "$COURIER_NEW_IP"; do
   out="$(probe courier-probe docker.io/curlimages/curl:8.10.1 \
          sh -c "curl -sSk -m 5 -o /dev/null -w 'HTTP %{http_code}' --resolve '${COURIER_DOMAIN}:443:${ip}' 'https://${COURIER_DOMAIN}/health' 2>&1" \
          2>&1 || true)"
-  out="$(printf '%s' "$out" | grep -v '^pod .* deleted' | tr '\n' ' ' | sed 's/  */ /g; s/ $//')"
+  out="$(clean_probe "$out")"
   if [[ "$out" == *"HTTP 200"* ]]; then
     ok "  [클러스터 → 택배사] ${ip}:443 응답 OK"
   else
@@ -110,7 +117,7 @@ for dns_ip in "$CORP_DNS_PRIMARY" "$CORP_DNS_SECONDARY"; do
   if printf '%s' "$out" | grep -q "Address: ${PG_IP}\b"; then
     ok "  [클러스터 → 사내 DNS ${dns_ip}] ${PG_DOMAIN} → ${PG_IP} OK"
   else
-    warn "  [클러스터 → 사내 DNS ${dns_ip}] ${PG_DOMAIN} 조회 실패: $(printf '%s' "$out" | grep -vE '^(Server|Address:.*#53|$)' | tr '\n' ' ' | sed 's/  */ /g')"
+    warn "  [클러스터 → 사내 DNS ${dns_ip}] ${PG_DOMAIN} 조회 실패: $(clean_probe "$(printf '%s\n' "$out" | grep -vE '^(Server:|Address:.*[#:]53$|$)')")"
     if [[ "$CORP_DNS_MODE" == bastion ]]; then
       warn "      → bastion 에서 './demo.sh corpdns up' 했는지, IP 가 붙어 있는지 확인 (README 5-5b)"
     else
@@ -125,8 +132,9 @@ out="$(probe pg-probe docker.io/curlimages/curl:8.10.1 \
 if [[ "$out" == *"HTTP 200"* ]]; then
   ok "  [클러스터 → PG] ${PG_IP}:443 (${PG_DOMAIN}) 응답 OK"
 else
-  warn "  [클러스터 → PG] ${PG_IP}:443 실패: $(printf '%s' "$out" | tr '\n' ' ')"
-  warn "      → 택배사 호스트 nginx 를 새 설정으로 다시 띄웠는지 (./courier-ext/run.sh up), pg.crt 가 있는지 (./demo.sh certs)"
+  out="$(clean_probe "$out")"
+  warn "  [클러스터 → PG] ${PG_IP}:443 실패: ${out}"
+  warn "      → $(probe_hint "$out")"
   fail=1
 fi
 
