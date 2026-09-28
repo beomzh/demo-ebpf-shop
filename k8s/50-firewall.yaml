@@ -2,7 +2,7 @@
 # OpenShift OVN-Kubernetes, Calico, Cilium 등 NetworkPolicy 를 집행하는 CNI 가 필요하다.
 # 허용되지 않은 목적지로의 SYN 은 조용히 버려진다(drop) → 배송 서비스 connect 가 5초 뒤 타임아웃.
 #
-# 규칙 목록 보기:  kubectl -n shop get netpol -l demo.observ/firewall=egress
+# 규칙 목록 보기:  kubectl -n demo-shop get netpol -l demo.observ/firewall=egress
 #
 # 1) 기본 규칙: 배송 서비스는 택배사 DNS 질의만 허용 → 그 밖의 모든 나가는 연결 차단
 #    (Service 53 → 파드 1053 으로 DNAT 되므로 파드 포트 1053 을 허용한다)
@@ -10,7 +10,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: fw-delivery-default
-  namespace: shop
+  namespace: demo-shop
   labels:
     demo.observ/firewall: egress
   annotations:
@@ -34,7 +34,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: fw-allow-courier-__COURIER_OLD_IP_DASHED__
-  namespace: shop
+  namespace: demo-shop
   labels:
     demo.observ/firewall: egress
   annotations:

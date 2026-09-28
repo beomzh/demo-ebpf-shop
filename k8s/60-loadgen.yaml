@@ -14,7 +14,7 @@ data:
     #   배송 조회  GET  /api/orders/{id}/tracking  게이트웨이 → 주문 → 배송 → 외부 택배사
     #   둘러보기   GET  /api/products/{id}, /api/members/{id}  (번갈아)
     # 배송 조회는 장애 시 5초씩 걸리므로 백그라운드로 보내 간격을 유지한다.
-    GATEWAY_URL="${GATEWAY_URL:-http://gateway-service.shop.svc.cluster.local:8080}"
+    GATEWAY_URL="${GATEWAY_URL:-http://gateway-service.demo-shop.svc.cluster.local:8080}"
     ORDER_INTERVAL="${ORDER_INTERVAL:-1}"
     TRACKING_INTERVAL="${TRACKING_INTERVAL:-1}"
     BROWSE_INTERVAL="${BROWSE_INTERVAL:-1}"
@@ -89,7 +89,7 @@ spec:
           image: docker.io/curlimages/curl:8.10.1
           command: ["/bin/sh", "/scripts/loadgen.sh"]
           env:
-            - { name: GATEWAY_URL, value: "http://gateway-service.shop.svc.cluster.local:8080" }
+            - { name: GATEWAY_URL, value: "http://gateway-service.demo-shop.svc.cluster.local:8080" }
             - { name: ORDER_INTERVAL, value: "__LOADGEN_ORDER_INTERVAL__" }
             - { name: TRACKING_INTERVAL, value: "__LOADGEN_TRACKING_INTERVAL__" }
             - { name: BROWSE_INTERVAL, value: "__LOADGEN_BROWSE_INTERVAL__" }

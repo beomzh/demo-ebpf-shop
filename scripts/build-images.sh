@@ -4,12 +4,12 @@
 #   ./scripts/build-images.sh --push     # 빌드 + push
 #
 # REGISTRY_MODE=ocp-internal (기본) 에서 --push 하면:
-#   1) shop 네임스페이스 생성 (이미지는 이 네임스페이스의 ImageStream 에 저장된다)
+#   1) demo-shop 네임스페이스 생성 (이미지는 이 네임스페이스의 ImageStream 에 저장된다)
 #   2) ImageStream 5개 생성 (shop-member-service ...)
 #   3) 내부 레지스트리 default route 로 로그인 (oc whoami -t 토큰, 표준입력으로 전달)
-#   4) <route>/shop/shop-<서비스>:<TAG> 로 빌드·push
+#   4) <route>/demo-shop/shop-<서비스>:<TAG> 로 빌드·push
 #   5) ImageStream 에 태그가 들어왔는지 확인
-# 클러스터는 image-registry.openshift-image-registry.svc:5000/shop/... 에서 pull 한다 (deploy.sh).
+# 클러스터는 image-registry.openshift-image-registry.svc:5000/demo-shop/... 에서 pull 한다 (deploy.sh).
 #
 # CONTAINER_ENGINE: podman(기본 우선) | docker
 source "$(dirname "$0")/lib.sh"

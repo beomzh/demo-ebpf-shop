@@ -69,7 +69,7 @@ flowchart LR
     DNS["courier-dns<br/>(CoreDNS)<br/>api.courier.example → IP 1개"]
   end
 
-  subgraph shop["namespace: shop (Observ 에서 보는 대상)"]
+  subgraph shop["namespace: demo-shop (Observ 에서 보는 대상)"]
     GW["게이트웨이<br/>C#"]
     ORD["주문<br/>Java"]
     MEM["회원<br/>Java"]
@@ -160,7 +160,7 @@ delivery-service upstream call failed req=lg-3fa9c1d2e8b0 target=api.courier.exa
 
 ```bash
 ID=lg-3fa9c1d2e8b0
-for d in gateway-service order-service delivery-service; do echo "== $d"; oc -n shop logs deploy/$d | grep -A8 "req=$ID"; done
+for d in gateway-service order-service delivery-service; do echo "== $d"; oc -n demo-shop logs deploy/$d | grep -A8 "req=$ID"; done
 ```
 
 > **eBPF 화면과의 관계**: 실패 경로·요청 ID 는 **애플리케이션 로그**의 기능입니다. eBPF 는 각 구간(게이트웨이→주문, 주문→배송 …)의
@@ -170,7 +170,7 @@ for d in gateway-service order-service delivery-service; do echo "== $d"; oc -n 
 
 | 구성 요소 | 무엇을 흉내 내나 | 구현 |
 | --- | --- | --- |
-| 여덟 서비스 + MySQL + Redis | 쇼핑몰 | `shop` 네임스페이스. 모니터링 코드·에이전트 없음 |
+| 여덟 서비스 + MySQL + Redis | 쇼핑몰 | `demo-shop` 네임스페이스. 모니터링 코드·에이전트 없음 |
 | `loadgen` | 사용자 트래픽 | 게이트웨이로 체크아웃·배송 조회·둘러보기를 1초 간격으로 호출 |
 | `courier-dns` | 택배사 도메인의 DNS | CoreDNS `hosts` 한 줄. `incident` 가 IP 를 바꿈 |
 | `fw-*` NetworkPolicy | 사내 방화벽 | 배송 서비스의 나가는 연결 허용 목록. 예전 IP 만 허용 |
@@ -517,19 +517,19 @@ curl -sk --resolve api.courier.example:443:10.0.0.62 https://api.courier.example
 
 이 명령이 하는 일 (10~25분, 첫 빌드는 베이스 이미지 다운로드로 더 걸림):
 
-1. `shop` 네임스페이스 생성
+1. `demo-shop` 네임스페이스 생성
 2. ImageStream 8개 생성 — `shop-gateway-service`, `shop-member-service`, `shop-product-service`, `shop-inventory-service`, `shop-order-service`, `shop-payment-service`, `shop-notification-service`, `shop-delivery-service`
 3. `oc whoami -t` 토큰으로 default route 에 로그인 (토큰은 표준입력으로 전달, 명령 인자에 남지 않음)
    `podman login -u <사용자> --password-stdin --tls-verify=false default-route-openshift-image-registry.apps.<도메인>`
-4. 서비스마다 `podman build` → `podman push default-route-…/shop/shop-<서비스>:1.0.0`
+4. 서비스마다 `podman build` → `podman push default-route-…/demo-shop/shop-<서비스>:1.0.0`
 5. ImageStream 에 `1.0.0` 태그가 들어왔는지 확인
 
 정상이면 마지막에 이렇게 나옵니다:
 
 ```
 NAME                    TAGS    PULL
-shop-delivery-service   1.0.0   image-registry.openshift-image-registry.svc:5000/shop/shop-delivery-service
-shop-member-service     1.0.0   image-registry.openshift-image-registry.svc:5000/shop/shop-member-service
+shop-delivery-service   1.0.0   image-registry.openshift-image-registry.svc:5000/demo-shop/shop-delivery-service
+shop-member-service     1.0.0   image-registry.openshift-image-registry.svc:5000/demo-shop/shop-member-service
 ...
 [..] done
 ```
@@ -544,16 +544,16 @@ shop-member-service     1.0.0   image-registry.openshift-image-registry.svc:5000
 
 이 명령이 하는 일:
 
-1. `shop`, `demo-infra` 네임스페이스 (Pod Security `restricted`)
+1. `demo-shop`, `demo-infra` 네임스페이스 (Pod Security `restricted`)
 2. ImageStream 에 이미지 8개가 있는지 확인 — 없으면 "`./demo.sh push` 를 먼저 실행하세요" 로 중단
 3. 시크릿: `courier-ca`(택배사 CA 공개 인증서), `mysql-auth`·`redis-auth`(**무작위 비밀번호**, 처음 한 번만 생성)
 4. `courier-dns` → 택배사 도메인이 **예전 IP** 를 가리킴
-5. MySQL, Redis, 여덟 서비스 (이미지: `image-registry.openshift-image-registry.svc:5000/shop/shop-*:<TAG>`)
+5. MySQL, Redis, 여덟 서비스 (이미지: `image-registry.openshift-image-registry.svc:5000/demo-shop/shop-*:<TAG>`)
 6. 방화벽: 배송 서비스는 택배사 DNS 와 **예전 IP:443** 만 나갈 수 있음
 7. 서비스 간 인바운드 격리 정책
 8. 모든 파드 Ready 대기 → 부하 발생기 기동
 
-`배포 완료` 가 나오면 끝입니다. 파드 상태: `oc get pods -n shop` (10개 Running: 서비스 8 + MySQL + Redis), `oc get pods -n demo-infra` (2개 Running)
+`배포 완료` 가 나오면 끝입니다. 파드 상태: `oc get pods -n demo-shop` (10개 Running: 서비스 8 + MySQL + Redis), `oc get pods -n demo-infra` (2개 Running)
 
 ### 5-10. 확인 **[작업 PC]**
 
@@ -607,7 +607,7 @@ fw-delivery-default           배송 서비스 egress 기본 규칙: DNS 만 허
 | `incident` | **새 IP** | 예전 IP | **502, 약 5초** |
 | `fix` | 새 IP | 예전 IP + **새 IP** | 200, 수십 ms |
 
-- Observ 화면은 네임스페이스 필터를 **`shop`** 으로, 트랜잭션 조회 소스 토글은 **eBPF** 로 둡니다.
+- Observ 화면은 네임스페이스 필터를 **`demo-shop`** 으로, 트랜잭션 조회 소스 토글은 **eBPF** 로 둡니다.
 - 화면별 진행·멘트·촬영 전 체크리스트·쓰지 않는 표현: **[docs/runbook.md](docs/runbook.md)**
 - 촬영 중에는 `status` 대신 `firewall` 만 쓰는 것을 권장합니다 (`status` 는 배송 서비스 파드에서 연결을 1번 시도하므로 실패 연결이 1건 늘어남).
 
@@ -654,6 +654,9 @@ oc login ...               # 세션이 만료됐다면
 ./demo.sh status
 ```
 
+- **네임스페이스 이름이 `shop` → `demo-shop` 으로 바뀐 버전으로 업데이트할 때**: 이전 `shop` 네임스페이스(파드·ImageStream 포함)는
+  자동으로 지워지지 않습니다. 새 버전을 `push` → `deploy` 한 뒤 옛 네임스페이스를 지우세요:
+  `oc delete namespace shop` (demo-infra 는 그대로 씁니다)
 - 같은 `TAG` 로 다시 push 하면 매니페스트가 바뀌지 않아 파드가 자동으로 재시작되지 않습니다. 그래서 `restart` 를 실행합니다.
 - 버전을 구분하고 싶으면 `demo.env` 의 `TAG` 를 올린 뒤 `push` → `deploy` 하면 자동으로 새 이미지로 교체됩니다.
 - `demo.env` 는 git 에 없으므로 `git pull` 로 덮어써지지 않습니다. 새 버전에서 `demo.env.example` 에 항목이 추가됐다면
@@ -671,7 +674,7 @@ oc login ...               # 세션이 만료됐다면
 | `certs` | 택배사 사설 CA·서버 인증서 생성 (이미 있으면 건너뜀) | `courier-ext/gen-certs.sh` |
 | `registry-route` | 내부 레지스트리 default route 열기 (cluster-admin) | `scripts/registry-route.sh` |
 | `check` | 사전 점검 | `scripts/check-prereq.sh` |
-| `build` | 이미지 빌드만 (`localhost/shop/...` 태그) | `scripts/build-images.sh` |
+| `build` | 이미지 빌드만 (`localhost/demo-shop/...` 태그) | `scripts/build-images.sh` |
 | `push` | 네임스페이스·ImageStream 생성 → 로그인 → 빌드·push → 태그 확인 | `scripts/build-images.sh --push` |
 | `deploy` | 전체 배포 (정상 상태) | `scripts/deploy.sh` |
 | `security` | 파드별 SCC·보안 설정·네트워크 정책 점검 | `scripts/security-check.sh` |
@@ -683,7 +686,7 @@ oc login ...               # 세션이 만료됐다면
 | `traffic` | 부하 발생기 로그 실시간 | `scripts/scenario.sh traffic` |
 | `restart` | 여덟 서비스 재시작 | `demo.sh` |
 | `images` | ImageStream·태그·pull 주소 | `demo.sh` |
-| `cleanup` | `shop`, `demo-infra` 삭제 (ImageStream 포함, 확인 질문 있음) | `scripts/cleanup.sh` |
+| `cleanup` | `demo-shop`, `demo-infra` 삭제 (ImageStream 포함, 확인 질문 있음) | `scripts/cleanup.sh` |
 | `local-up` 등 | 로컬 스모크 테스트 ([14. 부록](#14-부록)) | `demo.sh` |
 
 모든 스크립트는 `demo.env` 를 읽고, 클러스터 명령은 `CLI` 설정에 따라 `oc` 또는 `kubectl` 로 실행합니다.
@@ -695,23 +698,23 @@ oc login ...               # 세션이 만료됐다면
 OCP 내부 레지스트리는 **push 하는 주소와 pull 하는 주소가 다릅니다.**
 
 ```
-[작업 PC] podman push ──▶ default-route-openshift-image-registry.apps.<도메인>/shop/shop-member-service:1.0.0
-                                           │  (route → 내부 레지스트리, shop 네임스페이스의 ImageStream 에 저장)
+[작업 PC] podman push ──▶ default-route-openshift-image-registry.apps.<도메인>/demo-shop/shop-member-service:1.0.0
+                                           │  (route → 내부 레지스트리, demo-shop 네임스페이스의 ImageStream 에 저장)
                                            ▼
-                        ImageStream  shop/shop-member-service  tag 1.0.0
+                        ImageStream  demo-shop/shop-member-service  tag 1.0.0
                                            │
-[노드] pull ◀── image-registry.openshift-image-registry.svc:5000/shop/shop-member-service:1.0.0
+[노드] pull ◀── image-registry.openshift-image-registry.svc:5000/demo-shop/shop-member-service:1.0.0
 ```
 
 | 구분 | 주소 | 누가 쓰나 |
 | --- | --- | --- |
-| push | `default-route-openshift-image-registry.apps.<도메인>/shop/<이미지>:<TAG>` | 작업 PC 의 podman (`./demo.sh push`) |
-| pull | `image-registry.openshift-image-registry.svc:5000/shop/<이미지>:<TAG>` | 클러스터 노드 (Deployment 의 `image:`) |
+| push | `default-route-openshift-image-registry.apps.<도메인>/demo-shop/<이미지>:<TAG>` | 작업 PC 의 podman (`./demo.sh push`) |
+| pull | `image-registry.openshift-image-registry.svc:5000/demo-shop/<이미지>:<TAG>` | 클러스터 노드 (Deployment 의 `image:`) |
 
 - ImageStream 은 `push` 가 미리 만들어 둡니다(`oc create imagestream`). push 하면 해당 ImageStream 에 태그가 쌓입니다.
-- 파드는 `shop` 네임스페이스의 `default` 서비스어카운트로 같은 네임스페이스 ImageStream 을 pull 합니다 (OCP 가 자동으로 `system:image-puller` 권한 부여, 추가 설정 불필요).
+- 파드는 `demo-shop` 네임스페이스의 `default` 서비스어카운트로 같은 네임스페이스 ImageStream 을 pull 합니다 (OCP 가 자동으로 `system:image-puller` 권한 부여, 추가 설정 불필요).
 - 매니페스트(`k8s/*.yaml`)의 `__REGISTRY__` 는 `deploy` 때 pull 주소로 바뀝니다.
-- 확인: `./demo.sh images` 또는 `oc -n shop get is`, `oc -n shop get istag`
+- 확인: `./demo.sh images` 또는 `oc -n demo-shop get is`, `oc -n demo-shop get istag`
 
 ---
 
@@ -736,7 +739,7 @@ OCP 내부 레지스트리는 **push 하는 주소와 pull 하는 주소가 다�
 - **매 요청 DNS 조회**: TTL 5초 + Python 은 DNS 를 캐시하지 않음 → DNS 탭에 택배사 도메인 조회가 꾸준히 보입니다.
 - **평문 서비스 간 통신**: 서비스 간 HTTP/1.1 평문, MySQL `useSSL=false` → SLO Client 표·MySQL 탭에 프로토콜이 구분되어 나옵니다.
 - **프로브 잡음 제거**: readinessProbe 는 `tcpSocket` → kubelet 의 HTTP 헬스체크가 지표에 섞이지 않습니다.
-- **데모 장치 분리**: 부하 발생기·택배사 DNS 는 `demo-infra` → `shop` 으로 필터하면 여덟 서비스(+MySQL·Redis)만 보입니다.
+- **데모 장치 분리**: 부하 발생기·택배사 DNS 는 `demo-infra` → `demo-shop` 으로 필터하면 여덟 서비스(+MySQL·Redis)만 보입니다.
 - **평문 Redis**: 재고 서비스는 외부 라이브러리 없이 RESP 로 Redis 와 평문 통신 → Redis 명령이 보입니다.
 - **확실한 드롭**: 차단은 거부(RST)가 아니라 SYN drop → "연결 실패(타임아웃)"로 기록되고 배송 서비스 요청은 약 5초에 끝납니다.
 
@@ -760,7 +763,7 @@ OCP 내부 레지스트리는 **push 하는 주소와 pull 하는 주소가 다�
 | 항목 | 처리 |
 | --- | --- |
 | SCC | 모든 앱 파드가 **`restricted-v2`** 로 기동. `anyuid`·`privileged` 등 추가 SCC 불필요 |
-| Pod Security Admission | `shop`, `demo-infra` 에 `restricted` enforce·audit·warn 라벨 |
+| Pod Security Admission | `demo-shop`, `demo-infra` 에 `restricted` enforce·audit·warn 라벨 |
 | 실행 사용자 | 이미지 USER 는 숫자(비 root). 매니페스트에 `runAsUser` 를 **지정하지 않아** OCP 가 임의 UID(그룹 0) 부여 |
 | 컨테이너 설정 | `runAsNonRoot`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, `seccompProfile: RuntimeDefault` |
 | capability 예외 | `courier-dns` 만 `NET_BIND_SERVICE` 추가 — coredns 1.11+ 바이너리에 파일 capability 가 붙어 있어 없으면 `exec /coredns: operation not permitted`. restricted-v2 가 허용하는 유일한 추가 capability |
@@ -785,7 +788,7 @@ OCP 내부 레지스트리는 **push 하는 주소와 pull 하는 주소가 다�
 | --- | --- | --- |
 | `fw-delivery-default` | egress | 배송 → `courier-dns` (1053/UDP·TCP) **만** |
 | `fw-allow-courier-<예전IP>` | egress | 배송 → 택배사 예전 IP 443 |
-| `default-deny-ingress` | ingress | `shop`, `demo-infra` 기본 차단 |
+| `default-deny-ingress` | ingress | `demo-shop`, `demo-infra` 기본 차단 |
 | `allow-gateway-from-loadgen` | ingress | loadgen → 게이트웨이 8080 |
 | `allow-order-from-gateway` | ingress | 게이트웨이 → 주문 8080 |
 | `allow-product-from-gateway` | ingress | 게이트웨이 → 상품 8080 |
@@ -829,18 +832,18 @@ oc adm policy add-scc-to-user privileged -z <agent-serviceaccount> -n <agent-nam
 | `REGISTRY_MODE=ocp-internal 은 oc CLI 가 필요합니다` | 작업 PC 에 `oc` 설치 (4. 준비물) |
 | `내부 레지스트리 default route 가 없습니다` | `./demo.sh registry-route` (cluster-admin) |
 | `토큰이 없는 로그인입니다` | `system:admin` kubeconfig 사용 중 → `oc login -u <사용자> https://api…:6443` |
-| push 중 `unauthorized` / `denied` | 토큰 만료 → `oc login` 다시. 계정에 `shop` 네임스페이스 edit 이상 권한 필요 |
+| push 중 `unauthorized` / `denied` | 토큰 만료 → `oc login` 다시. 계정에 `demo-shop` 네임스페이스 edit 이상 권한 필요 |
 | push 중 `x509: certificate signed by unknown authority` | `demo.env` 의 `REGISTRY_TLS_VERIFY=false` 확인 |
 | push 중 `no such host` (route 주소) | 작업 PC 가 `*.apps.<도메인>` 을 해석하지 못함 → DNS 또는 `/etc/hosts` 에 route 주소 → 인그레스(라우터) IP 등록 |
 | 빌드 중 `toomanyrequests` | Docker Hub pull 한도 → `podman login docker.io` 후 다시 |
 | gateway 빌드 중 `NU1301` / `Unable to load the service index` | 작업 PC 가 `api.nuget.org` 에 접속 불가 (프록시 설정 확인) |
 | inventory 빌드 중 `Could not find a valid gem 'webrick'` | 작업 PC 가 `rubygems.org` 에 접속 불가 (프록시 설정 확인) |
-| 재고 서비스 로그 `redis error … NOAUTH` / `WRONGPASS` | `redis-auth` 시크릿과 Redis 비밀번호 불일치 → `oc -n shop rollout restart deploy/redis deploy/inventory-service` |
+| 재고 서비스 로그 `redis error … NOAUTH` / `WRONGPASS` | `redis-auth` 시크릿과 Redis 비밀번호 불일치 → `oc -n demo-shop rollout restart deploy/redis deploy/inventory-service` |
 | 빌드 중 `short-name resolution enforced` | Dockerfile `FROM` 은 전체 경로여야 함 (현재 모두 전체 경로. 직접 수정했다면 확인) |
 | `deploy` 가 `ImageStream 에 없습니다` 로 중단 | `./demo.sh push` 먼저. `./demo.sh images` 로 태그 확인. `demo.env` 의 `TAG` 가 push 때와 같은지 |
-| 파드 `ImagePullBackOff` (shop-* 이미지) | `oc -n shop get istag`, `oc -n shop describe pod <pod>`. push 한 네임스페이스가 `shop` 인지 |
+| 파드 `ImagePullBackOff` (shop-* 이미지) | `oc -n demo-shop get istag`, `oc -n demo-shop describe pod <pod>`. push 한 네임스페이스가 `demo-shop` 인지 |
 | 파드 `ImagePullBackOff` (curl·coredns·mysql) | 노드가 docker.io·registry.k8s.io·quay.io 에 접근 불가 → 아래 "폐쇄망" |
-| 파드 `CreateContainerConfigError` / SCC 거부 | `oc get pod <pod> -o yaml \| grep scc`, `oc get events -n shop`. `./demo.sh security` |
+| 파드 `CreateContainerConfigError` / SCC 거부 | `oc get pod <pod> -o yaml \| grep scc`, `oc get events -n demo-shop`. `./demo.sh security` |
 | courier-dns 파드 `exec /coredns: operation not permitted` | `NET_BIND_SERVICE` capability 누락. `k8s/40-courier-dns.yaml` 에 `add: ["NET_BIND_SERVICE"]` 가 있는지 확인 후 `./demo.sh deploy` |
 | 배송 서비스 `CrashLoopBackOff`, 로그 `CA file … not found` | `courier-ca` 시크릿 없음 → `./demo.sh certs` 후 `./demo.sh deploy` |
 | `check` 4) 택배사 응답 없음 | 택배사 호스트 nginx(`sudo ./run.sh status`), 443 방화벽, 노드 → 택배사 IP 라우팅 확인 |
@@ -850,7 +853,7 @@ oc adm policy add-scc-to-user privileged -z <agent-serviceaccount> -n <agent-nam
 
 | 증상 | 원인 / 조치 |
 | --- | --- |
-| 어디서 실패하는지 모르겠음 | `./demo.sh status` 의 `실패 경로`, 또는 `oc -n shop logs deploy/gateway-service \| grep "upstream call failed"` 의 `path=` 를 보면 끝까지 보입니다 ([2. 구성](#애플리케이션-로그로-실패-지점-찾기)) |
+| 어디서 실패하는지 모르겠음 | `./demo.sh status` 의 `실패 경로`, 또는 `oc -n demo-shop logs deploy/gateway-service \| grep "upstream call failed"` 의 `path=` 를 보면 끝까지 보입니다 ([2. 구성](#애플리케이션-로그로-실패-지점-찾기)) |
 | `incident` 후에도 배송 조회가 200 | 새 IP 가 이미 허용됨 (`./demo.sh firewall` 에 새 IP 규칙이 있으면 `./demo.sh reset` 후 다시) |
 | 장애 시 5초가 아니라 즉시 실패 | 경로 어딘가에서 RST/ICMP 거부 중. 택배사 호스트 방화벽이 새 IP 를 거부하고 있지 않은지 확인 |
 | 정상 상태에서도 연결 실패 | 택배사 호스트 nginx, 예전 IP 라우팅 확인 (`check` 4번) |
@@ -858,7 +861,7 @@ oc adm policy add-scc-to-user privileged -z <agent-serviceaccount> -n <agent-nam
 | DNS 탭에 NXDOMAIN 이 보임 | 배송 서비스 파드 `/etc/resolv.conf` 에 search 가 없고 `ndots:1` 인지 확인 |
 | T-Map·트랜잭션 조회가 비어 있음 | ClickHouse, 노드 에이전트 traces endpoint 설정 |
 | 언어가 Go 로 안 나옴 | `product-service` 를 `-s -w` 없이 Go 1.17+ 로 빌드했는지 |
-| 주문 → 다른 서비스 호출이 모두 타임아웃 | 인바운드 격리 정책: `oc get netpol -n shop -l demo.observ/policy=isolation` |
+| 주문 → 다른 서비스 호출이 모두 타임아웃 | 인바운드 격리 정책: `oc get netpol -n demo-shop -l demo.observ/policy=isolation` |
 
 ### 폐쇄망 (노드가 인터넷 이미지를 못 받을 때)
 
@@ -867,12 +870,12 @@ oc adm policy add-scc-to-user privileged -z <agent-serviceaccount> -n <agent-nam
 ```bash
 oc -n demo-infra import-image curl:8.10.1   --from=docker.io/curlimages/curl:8.10.1 --confirm
 oc -n demo-infra import-image coredns:v1.11.3 --from=registry.k8s.io/coredns/coredns:v1.11.3 --confirm
-oc -n shop       import-image mysql-80:c9s   --from=quay.io/sclorg/mysql-80-c9s:c9s --confirm
-oc -n shop       import-image redis-7:c9s    --from=quay.io/sclorg/redis-7-c9s:c9s --confirm
+oc -n demo-shop       import-image mysql-80:c9s   --from=quay.io/sclorg/mysql-80-c9s:c9s --confirm
+oc -n demo-shop       import-image redis-7:c9s    --from=quay.io/sclorg/redis-7-c9s:c9s --confirm
 # k8s/60-loadgen.yaml    image: image-registry.openshift-image-registry.svc:5000/demo-infra/curl:8.10.1
 # k8s/40-courier-dns.yaml image: image-registry.openshift-image-registry.svc:5000/demo-infra/coredns:v1.11.3
-# k8s/10-mysql.yaml      image: image-registry.openshift-image-registry.svc:5000/shop/mysql-80:c9s
-# k8s/15-redis.yaml      image: image-registry.openshift-image-registry.svc:5000/shop/redis-7:c9s
+# k8s/10-mysql.yaml      image: image-registry.openshift-image-registry.svc:5000/demo-shop/mysql-80:c9s
+# k8s/15-redis.yaml      image: image-registry.openshift-image-registry.svc:5000/demo-shop/redis-7:c9s
 ```
 
 (`import-image` 는 클러스터가 원본 레지스트리에 접근할 수 있거나 미러가 설정돼 있어야 합니다. 완전 폐쇄망이면 `oc image mirror` 로 옮깁니다.)
@@ -880,8 +883,8 @@ oc -n shop       import-image redis-7:c9s    --from=quay.io/sclorg/redis-7-c9s:c
 ### 로그 보기
 
 ```bash
-oc -n shop logs deploy/delivery-service -f     # 실패 단계·목적지 IP·소요시간
-oc -n shop logs deploy/order-service -f
+oc -n demo-shop logs deploy/delivery-service -f     # 실패 단계·목적지 IP·소요시간
+oc -n demo-shop logs deploy/order-service -f
 oc -n demo-infra logs deploy/courier-dns -f     # DNS 질의 로그
 ./demo.sh traffic                               # 부하 발생기
 ```
@@ -892,7 +895,7 @@ oc -n demo-infra logs deploy/courier-dns -f     # DNS 질의 로그
 
 ```bash
 # [작업 PC]
-./demo.sh cleanup          # shop, demo-infra 삭제 (ImageStream·이미지 포함). 확인 질문에 y
+./demo.sh cleanup          # demo-shop, demo-infra 삭제 (ImageStream·이미지 포함). 확인 질문에 y
 
 # [택배사 호스트]
 sudo ./run.sh down
@@ -971,7 +974,7 @@ REGISTRY_TLS_VERIFY=true
 ```
 
 `podman login harbor.example.com` 후 `./demo.sh push` → `./demo.sh deploy`. 사설 레지스트리 인증이 필요하면
-`shop` 네임스페이스 default 서비스어카운트에 pull secret 을 연결하세요.
+`demo-shop` 네임스페이스 default 서비스어카운트에 pull secret 을 연결하세요.
 
 ### 일반 쿠버네티스
 

@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_NS=shop
+APP_NS=demo-shop
 INFRA_NS=demo-infra
 FW_LABEL=demo.observ/firewall=egress
 SERVICES=(gateway-service member-service product-service inventory-service order-service payment-service notification-service delivery-service)
@@ -74,9 +74,9 @@ detect_engine() {
 
 # ── 이미지 레지스트리 ────────────────────────────────────────
 # push 주소와 pull 주소가 다르다 (ocp-internal):
-#   push : 클러스터 밖(작업 PC)에서 → default route   <route-host>/shop/<이미지>
-#   pull : 클러스터 안(노드)에서    → 내부 서비스     image-registry.openshift-image-registry.svc:5000/shop/<이미지>
-# 이미지를 push 하면 shop 네임스페이스의 같은 이름 ImageStream 에 태그가 쌓인다.
+#   push : 클러스터 밖(작업 PC)에서 → default route   <route-host>/demo-shop/<이미지>
+#   pull : 클러스터 안(노드)에서    → 내부 서비스     image-registry.openshift-image-registry.svc:5000/demo-shop/<이미지>
+# 이미지를 push 하면 demo-shop 네임스페이스의 같은 이름 ImageStream 에 태그가 쌓인다.
 registry_route_host() {
   kc -n "$OCP_REGISTRY_NS" get route default-route -o jsonpath='{.spec.host}' 2>/dev/null || true
 }

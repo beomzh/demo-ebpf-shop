@@ -15,7 +15,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: default-deny-ingress
-  namespace: shop
+  namespace: demo-shop
   labels: { demo.observ/policy: isolation }
 spec:
   podSelector: {}
@@ -25,7 +25,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-gateway-from-loadgen
-  namespace: shop
+  namespace: demo-shop
   labels: { demo.observ/policy: isolation }
 spec:
   podSelector:
@@ -44,7 +44,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-order-from-gateway
-  namespace: shop
+  namespace: demo-shop
   labels: { demo.observ/policy: isolation }
 spec:
   podSelector:
@@ -61,7 +61,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-product-from-gateway
-  namespace: shop
+  namespace: demo-shop
   labels: { demo.observ/policy: isolation }
 spec:
   podSelector:
@@ -78,7 +78,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-member-from-callers
-  namespace: shop
+  namespace: demo-shop
   labels: { demo.observ/policy: isolation }
 spec:
   podSelector:
@@ -98,7 +98,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-inventory-from-callers
-  namespace: shop
+  namespace: demo-shop
   labels: { demo.observ/policy: isolation }
 spec:
   podSelector:
@@ -118,7 +118,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-order-backends-from-order
-  namespace: shop
+  namespace: demo-shop
   labels: { demo.observ/policy: isolation }
 spec:
   podSelector:
@@ -138,7 +138,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-mysql-from-member
-  namespace: shop
+  namespace: demo-shop
   labels: { demo.observ/policy: isolation }
 spec:
   podSelector:
@@ -155,7 +155,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-redis-from-inventory
-  namespace: shop
+  namespace: demo-shop
   labels: { demo.observ/policy: isolation }
 spec:
   podSelector:
@@ -191,7 +191,7 @@ spec:
   ingress:
     - from:
         - namespaceSelector:
-            matchLabels: { kubernetes.io/metadata.name: shop }
+            matchLabels: { kubernetes.io/metadata.name: demo-shop }
           podSelector:
             matchLabels: { app: delivery-service }
       ports:

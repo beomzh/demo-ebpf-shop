@@ -41,7 +41,7 @@ fi
 
 info "3) OpenTelemetry 에이전트/SDK 가 섞여 있지 않은지 (eBPF 데이터만 보이게)"
 if kc -n "$APP_NS" get pods -o yaml 2>/dev/null | grep -Eqi 'opentelemetry|otel|javaagent'; then
-  warn "  shop 네임스페이스 파드에 OpenTelemetry/javaagent 흔적이 있습니다."; fail=1
+  warn "  demo-shop 네임스페이스 파드에 OpenTelemetry/javaagent 흔적이 있습니다."; fail=1
 else
   ok "  없음"
 fi
