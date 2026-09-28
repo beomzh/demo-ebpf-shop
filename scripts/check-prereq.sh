@@ -141,7 +141,33 @@ fi
 info "6) 인증서"
 [[ -f "$ROOT/courier-ext/certs/pg.crt" ]] && ok "  courier-ext/certs/pg.crt 있음" \
   || { warn "  courier-ext/certs/pg.crt 없음 — './demo.sh certs' 후 './courier-ext/run.sh up' 으로 nginx 재기동"; fail=1; }
-if [[ -f "$ROOT/courier-ext/certs/ca.crt" ]]; then ok "  courier-ext/certs/ca.crt 있음"
+if [[ -f "$ROOT/courier-ext/certs/ca.crt" ]]; then ok "  courier-ext/certs/ca.crt 있음 (지문 $(ca_fingerprint))"
 else warn "  courier-ext/certs/ca.crt 없음 — './demo.sh certs' 필요 (없으면 배포가 중단됩니다)"; fail=1; fi
+
+# 클러스터 시크릿의 CA 가 지금 CA 와 같은지 (다르면 파드가 'unable to get local issuer certificate' 로 실패)
+secret_ca="$(kc -n "$APP_NS" get secret courier-ca -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)"
+if [[ -n "$secret_ca" ]]; then
+  tmp_ca="$(mktemp)"; printf '%s' "$secret_ca" | base64 -d > "$tmp_ca" 2>/dev/null || true
+  if [[ "$(ca_fingerprint "$tmp_ca")" == "$(ca_fingerprint)" ]]; then
+    ok "  클러스터 시크릿 courier-ca = 지금 CA"
+  else
+    warn "  클러스터 시크릿 courier-ca($(ca_fingerprint "$tmp_ca")) 가 지금 CA($(ca_fingerprint)) 와 다름 → './demo.sh deploy' (CA 를 쓰는 파드가 자동 재시작됨)"
+    fail=1
+  fi
+  rm -f "$tmp_ca"
+fi
+
+# nginx 가 내미는 택배사·PG 인증서가 지금 CA 로 검증되는지 (작업 PC 에서)
+for pair in "${COURIER_DOMAIN}:${COURIER_OLD_IP}" "${PG_DOMAIN}:${PG_IP}"; do
+  d="${pair%%:*}"; ip_="${pair#*:}"
+  [[ -f "$ROOT/courier-ext/certs/ca.crt" ]] || break
+  if out="$(LC_ALL=C curl -sS -m 5 -o /dev/null --cacert "$ROOT/courier-ext/certs/ca.crt" --resolve "${d}:443:${ip_}" "https://${d}/health" 2>&1)"; then
+    ok "  [작업 PC] https://${d} (${ip_}) 인증서 검증 OK"
+  else
+    warn "  [작업 PC] https://${d} (${ip_}) 인증서 검증 실패: ${out%%$'\n'*}"
+    warn "      → './demo.sh certs' 후 './courier-ext/run.sh up' (nginx 가 옛 인증서·다른 CA 인증서를 쓰는 중)"
+    fail=1
+  fi
+done
 
 (( fail == 0 )) && ok "점검 통과" || die "점검 항목을 확인하세요."

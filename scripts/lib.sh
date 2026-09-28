@@ -129,6 +129,13 @@ image_name() { echo "shop-$1"; }   # 서비스명 → 이미지(ImageStream) 이
 
 dashed() { echo "${1//./-}"; }
 
+# ca_fingerprint [파일] : CA 인증서의 SHA256 지문 (콜론 없는 소문자 앞 16자). 없으면 none
+ca_fingerprint() {
+  local f="${1:-$ROOT/courier-ext/certs/ca.crt}"
+  [[ -f "$f" ]] || { echo none; return; }
+  openssl x509 -in "$f" -noout -fingerprint -sha256 2>/dev/null | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f' | cut -c1-16
+}
+
 # render <manifest> [COURIER_DNS_IP] → stdout
 # __NONOCP_RUN_AS_USER__ : 이미지의 USER 가 숫자가 아닌 파드(loadgen, courier-dns)용.
 #   OpenShift 는 UID 를 자동 부여하므로 줄을 지우고, 그 밖의 쿠버네티스는 runAsUser 를 넣는다
@@ -148,6 +155,7 @@ render() {
     -e "s#__LOADGEN_REPLICAS__#${LOADGEN_REPLICAS}#g" \
     -e "s#__LOADGEN_BROWSE_INTERVAL__#${LOADGEN_BROWSE_INTERVAL}#g" \
     -e "s#__PG_DOMAIN__#${PG_DOMAIN}#g" \
+    -e "s#__CA_SHA256__#$(ca_fingerprint)#g" \
     -e "s#__PG_DNS_SERVERS__#${CORP_DNS_PRIMARY},${CORP_DNS_SECONDARY}#g" \
     "$1"
 }

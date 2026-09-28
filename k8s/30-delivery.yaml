@@ -16,6 +16,9 @@ spec:
   template:
     metadata:
       labels: { app: delivery-service }
+      annotations:
+        # 외부 API 사설 CA 지문. CA 가 바뀌면 값이 달라져 deploy 때 파드가 재시작된다 (CA 는 기동할 때 읽음)
+        demo.observ/ca-sha256: "__CA_SHA256__"
     spec:
       automountServiceAccountToken: false
       securityContext:

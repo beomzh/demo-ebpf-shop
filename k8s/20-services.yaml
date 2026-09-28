@@ -259,6 +259,9 @@ spec:
   template:
     metadata:
       labels: { app: order-service }
+      annotations:
+        # 외부 API(PG) 사설 CA 지문. CA 가 바뀌면 deploy 때 파드가 재시작된다
+        demo.observ/ca-sha256: "__CA_SHA256__"
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -325,6 +328,9 @@ spec:
   template:
     metadata:
       labels: { app: payment-service }
+      annotations:
+        # 외부 API(PG) 사설 CA 지문. CA 가 바뀌면 deploy 때 파드가 재시작된다
+        demo.observ/ca-sha256: "__CA_SHA256__"
     spec:
       automountServiceAccountToken: false
       securityContext:
