@@ -65,54 +65,73 @@ eBPF 가 가장 잘 보여줄 수 있는 사건입니다. 화면에 나오는 �
 
 ## 2. 구성
 
+### 그림 1. 서비스 간 호출 (클러스터 안)
+
 ```mermaid
 flowchart LR
-  subgraph infra["namespace: demo-infra (데모 장치)"]
-    LG["loadgen<br/>(curl)"]
-    DNS["courier-dns<br/>(CoreDNS)<br/>api.courier.example → IP 1개"]
-  end
-
-  subgraph shop["namespace: demo-shop (Observ 에서 보는 대상)"]
-    GW["게이트웨이<br/>C#"]
-    ORD["주문<br/>Java"]
-    MEM["회원<br/>Java"]
-    PRD["상품<br/>Go"]
-    INV["재고<br/>Ruby"]
-    PAY["결제<br/>Node.js"]
-    NOTI["알림<br/>PHP"]
-    DLV["배송<br/>Python · 모니터링 없음"]
-    DB[("MySQL")]
-    RD[("Redis")]
-    FW{{"방화벽<br/>NetworkPolicy egress"}}
-  end
-
-  subgraph ext["클러스터 밖: 외부 API 호스트 (택배사·PG사 nginx)"]
-    OLD["택배사 예전 IP :443<br/>(PG사도 이 IP)"]
-    NEW["택배사 새 IP :443"]
-  end
-
-  subgraph corp["클러스터 밖: 사내 DNS"]
-    P1["주 DNS"]
-    P2["보조 DNS"]
-  end
-
-  LG --> GW
-  GW --> PRD --> INV --> RD
-  GW --> MEM --> DB
-  GW --> ORD
+  LG["loadgen<br/>(demo-infra)"] --> GW["게이트웨이<br/>C#"]
+  GW --> PRD["상품<br/>Go"] --> INV["재고<br/>Ruby"] --> RD[("Redis")]
+  GW --> MEM["회원<br/>Java"] --> DB[("MySQL")]
+  GW --> ORD["주문<br/>Java"]
   ORD --> MEM
   ORD --> INV
-  ORD --> PAY --> MEM
-  PAY -.->|"PG 승인 (HTTPS)"| OLD
-  PAY -.->|"PG 도메인 조회"| P1
-  P1 -.->|"실패 시"| P2
-  ORD --> NOTI --> MEM
-  ORD -->|"배송 조회"| DLV
-  DLV -.->|DNS| DNS
-  DLV --> FW
-  FW -->|허용| OLD
-  FW -.->|"차단 (SYN drop)"| NEW
+  ORD --> NOTI["알림<br/>PHP"] --> MEM
+  ORD --> DLV["배송<br/>Python"]
+  DLV -.-> EXT1(["외부 택배사 → 그림 2"])
+  ORD --> PAY["결제<br/>Node.js"]
+  PAY --> MEM
+  PAY -.-> EXT2(["외부 PG사 → 그림 2"])
+
+  classDef courier fill:#fff1e0,stroke:#e8590c,color:#000
+  classDef pg fill:#e7f0ff,stroke:#1c7ed6,color:#000
+  class DLV,EXT1 courier
+  class PAY,EXT2 pg
 ```
+
+### 그림 2. 외부 연결 — 두 시나리오의 무대
+
+```mermaid
+flowchart LR
+  subgraph K["클러스터"]
+    DLV["배송 · Python<br/>(demo-shop)"]
+    PAY["결제 · Node.js<br/>(demo-shop)"]
+    CDNS["courier-dns<br/>택배사 도메인 전용 DNS<br/>(demo-infra)"]
+    FW{{"방화벽<br/>NetworkPolicy"}}
+  end
+
+  subgraph N["외부 API 호스트 (nginx)"]
+    COLD["택배사 API<br/>예전 IP:443"]
+    CNEW["택배사 API<br/>새 IP:443"]
+    PGAPI["PG사 API<br/>PG_IP:443"]
+  end
+
+  subgraph C["사내 DNS"]
+    D1["주 DNS"]
+    D2["보조 DNS"]
+  end
+
+  DLV -->|"① 도메인 조회"| CDNS
+  DLV -->|"② 연결"| FW
+  FW -->|"허용"| COLD
+  FW -.->|"차단"| CNEW
+
+  PAY -->|"① 도메인 조회"| D1
+  PAY -.->|"주 DNS 무응답 시"| D2
+  D1 -.->|"존 복제"| D2
+  PAY -->|"② 승인 HTTPS"| PGAPI
+
+  classDef courier fill:#fff1e0,stroke:#e8590c,color:#000
+  classDef pg fill:#e7f0ff,stroke:#1c7ed6,color:#000
+  class DLV,CDNS,FW,COLD,CNEW courier
+  class PAY,D1,D2,PGAPI pg
+```
+
+주황 = **시나리오 ① 택배사 IP 변경 (본편)**, 파랑 = **시나리오 ② PG 도메인 DNS 장애 (추가)**. 나머지는 평소 트래픽입니다.
+
+| 시나리오 | 장애가 나는 서비스 | 도메인 조회 | 외부 목적지 | 장애를 만드는 장치 | 명령 |
+| --- | --- | --- | --- | --- | --- |
+| ① 택배사 IP 변경 | 배송 (Python) | **courier-dns** — 클러스터 안(`demo-infra`), 택배사 도메인 전용 | nginx 의 택배사 API (예전 IP / 새 IP) | 방화벽(NetworkPolicy)에 새 IP 없음 | `incident` → `firewall` → `fix` |
+| ② PG 도메인 DNS 장애 | 결제 (Node.js) | **사내 DNS 주·보조** — 클러스터 밖, 결제 서비스가 직접 질의 | nginx 의 PG사 API (`PG_IP`) | 사내 DNS 에 새 PG 도메인 미등록 / 주 DNS 무응답 | `pg-missing` → `pg-register` / `pg-primary-down` |
 
 ### 사용자 요청별 호출 경로
 
@@ -182,16 +201,21 @@ for d in gateway-service order-service delivery-service; do echo "== $d"; oc -n 
 | 구성 요소 | 무엇을 흉내 내나 | 구현 |
 | --- | --- | --- |
 | 여덟 서비스 + MySQL + Redis | 쇼핑몰 | `demo-shop` 네임스페이스. 모니터링 코드·에이전트 없음 |
-| `loadgen` | 사용자 트래픽 | 게이트웨이로 체크아웃·배송 조회·둘러보기를 1초 간격으로 호출 |
-| `courier-dns` | 택배사 도메인의 DNS | CoreDNS `hosts` 한 줄. `incident` 가 IP 를 바꿈 |
-| `fw-*` NetworkPolicy | 사내 방화벽 | 배송 서비스의 나가는 연결 허용 목록. 예전 IP 만 허용 |
-| `courier-ext/` | 외부 택배사 API | 클러스터 **밖** 리눅스 호스트의 nginx(HTTPS). 예전 IP·새 IP 양쪽에서 443 응답 |
+| `loadgen` | 사용자 트래픽 | 게이트웨이로 체크아웃·배송 조회·둘러보기를 1초 간격으로 호출 (`demo-infra`) |
+| `courier-dns` | 택배사 도메인의 DNS | 클러스터 안 CoreDNS, `hosts` 한 줄. `incident` 가 IP 를 바꿈 (`demo-infra`) |
+| `fw-*` NetworkPolicy | 사내 방화벽 | 배송 서비스의 나가는 연결 허용 목록. 택배사 예전 IP 만 허용 |
+| 외부 API 호스트 (`courier-ext/`) | 외부 택배사 API + 외부 PG사 API | 클러스터 **밖** 리눅스 호스트의 nginx 1대(HTTPS). 요청 도메인(TLS SNI)으로 택배사·PG 를 구분해 응답. 택배사는 예전 IP·새 IP, PG 는 `PG_IP`(기본: 택배사 예전 IP) |
+| 사내 DNS 주·보조 | 회사의 DNS 서버 2대 | 결제 서비스가 PG 도메인을 직접 질의. bastion 모드: `corpdns-ext/` 의 CoreDNS 2개 / corporate 모드: 실제 사내 DNS (예: BIND master·slave) — [5-5b](#5-5b-사내-dns-준비--pg-시나리오용) |
 
 **장애가 나는 원리**: DNS 가 새 IP 를 돌려주면 배송 서비스가 새 IP 로 TCP 연결을 시도합니다.
 방화벽(NetworkPolicy)이 SYN 을 조용히 버리므로 연결은 5초 뒤 타임아웃되고, 배송 서비스는 주문 서비스에 503,
 주문 서비스는 게이트웨이에 502, 게이트웨이는 사용자에게 502 를 돌려줍니다. eBPF 는 이것을
 **실패한 TCP 연결(목적지 = 새 IP:443)** 과 **약 5초 걸린 5xx HTTP 요청**(주문→배송, 게이트웨이→주문 구간)으로 봅니다.
 체크아웃·상품·회원 요청은 배송과 무관하므로 장애 중에도 정상입니다.
+
+**PG 시나리오의 원리**: 결제 서비스는 PG 도메인을 사내 주 DNS 에 먼저 묻습니다. 주 DNS 에 레코드가 없으면 **NXDOMAIN**(확정 답)을 받아
+보조로 넘어가지 않고 곧바로 실패하고 → 결제 504 → 주문 502 → 게이트웨이 502 가 됩니다. 주 DNS 가 응답하지 않으면 2초 뒤 보조 DNS 로 넘어가
+결제는 성공하지만 느려집니다. eBPF 는 이것을 결제 서비스 DNS 탭의 **NXDOMAIN 증가 / 조회 지연**과 체크아웃 5xx·지연으로 봅니다. 자세한 흐름은 [6-2](#6-2-추가-시나리오--외부-pg-도메인-dns-장애).
 
 ---
 
