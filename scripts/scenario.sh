@@ -10,9 +10,11 @@
 #   traffic    부하 발생기 로그 실시간 보기
 #
 # 추가 시나리오 — 외부 PG사 도메인 DNS 장애 (주문·결제 서비스가 사내 DNS 로 PG 도메인 조회)
-#   pg-missing       사내 DNS 에 PG 도메인이 없음 → NXDOMAIN (Java UnknownHostException, Node queryA ENOTFOUND)
+#   pg-missing       PG사가 새 도메인으로 이전 → 앱은 새 도메인으로 배포됐지만 사내 DNS 에 등록 누락 → NXDOMAIN
+#                    (Java UnknownHostException, Node queryA ENOTFOUND, 체크아웃 502)
+#   pg-register      해결: 사내 DNS 에 새 도메인 등록 → 앱 재시작 없이 회복 (corporate 모드: 등록될 때까지 기다림)
 #   pg-primary-down  사내 주 DNS 장애 → 타임아웃 후 보조 DNS 로 넘어감 (결제 지연, dns fallback 로그)
-#   pg-reset         PG 시나리오 원상 복구
+#   pg-reset         PG 시나리오 원상 복구 (다음 테이크 준비)
 #   pg-status        사내 DNS 서버별 응답과 체크아웃 1건 결과
 source "$(dirname "$0")/lib.sh"
 load_env
@@ -139,6 +141,44 @@ spec:
 EOF
 }
 
+# 결제 파드에서 도메인을 주·보조 DNS 에 각각 조회해 둘 다 IP 를 돌려주면 0
+pg_resolves_everywhere() {
+  kc -n "$APP_NS" exec deploy/payment-service -- node -e "
+const dns = require('node:dns');
+(async () => {
+  let ok = 0; const servers = process.env.PG_DNS_SERVERS.split(',');
+  for (const s of servers) {
+    const r = new dns.promises.Resolver({ timeout: 2000, tries: 1 }); r.setServers([s]);
+    try { await r.resolve4('$1'); ok++; } catch (_) {}
+  }
+  process.exit(ok === servers.length ? 0 : 1);
+})();" >/dev/null 2>&1
+}
+
+current_pg_domain() {
+  kc -n "$APP_NS" get deploy payment-service \
+    -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="PG_DOMAIN")].value}' 2>/dev/null
+}
+
+pg_register() {
+  local d="$PG_UNREGISTERED_DOMAIN" waited=0 limit="${PG_REGISTER_WAIT:-600}"
+  [[ "$(current_pg_domain)" == "$d" ]] || warn "앱이 아직 ${d} 를 쓰고 있지 않습니다 — 먼저 './demo.sh pg-missing'"
+  if [[ "$CORP_DNS_MODE" == bastion ]]; then
+    corpdns record-add "$d"
+  else
+    info "사내 DNS 담당자에게 요청할 내용 (주 ${CORP_DNS_PRIMARY}, 보조 ${CORP_DNS_SECONDARY} 모두):"
+    echo "    A 레코드  ${d}  →  ${PG_IP}   (TTL 5~60초)"
+    echo "    직접 관리하는 BIND 라면 주 DNS 존 파일에 '${d%%.*}  IN A  ${PG_IP}' 추가 + SOA 시리얼 증가 + 'rndc reload'"
+    info "등록될 때까지 기다립니다 (최대 ${limit}초, Ctrl+C 로 중단 가능)"
+  fi
+  until pg_resolves_everywhere "$d"; do
+    (( waited >= limit )) && die "${limit}초 안에 주·보조 DNS 모두에서 ${d} 가 조회되지 않았습니다 ('./demo.sh pg-status' 로 서버별 결과 확인)"
+    (( waited % 15 == 0 )) && info "  아직 조회 안 됨 (${waited}s) — 주·보조 모두 등록돼야 합니다"
+    sleep 5; waited=$((waited + 5))
+  done
+  ok "주·보조 사내 DNS 모두 ${d} → ${PG_IP} 조회됨 — 앱 재시작 없이 다음 요청부터 회복됩니다"
+}
+
 pg_status() {
   info "사내 DNS (${CORP_DNS_MODE} 모드) — 결제 서비스 파드에서 서버별로 ${PG_DOMAIN} 조회"
   kc -n "$APP_NS" exec deploy/payment-service -- node -e "
@@ -185,12 +225,15 @@ case "${1:-}" in
     ok "해결: 방화벽에 ${COURIER_NEW_IP}:443 허용 추가"
     ;;
   pg-missing)
-    if [[ "$CORP_DNS_MODE" == bastion ]]; then
-      corpdns record-remove
-    else
-      set_pg_domain "$PG_UNREGISTERED_DOMAIN"
-    fi
-    ok "PG 도메인 레코드 없음 재현 — 체크아웃이 실패합니다 (로그: UnknownHostException / queryA ENOTFOUND)"
+    # PG사가 새 도메인으로 이전 → 앱은 새 도메인으로 배포됐지만 사내 DNS 에 등록이 누락된 상황
+    [[ "$CORP_DNS_MODE" == bastion ]] && corpdns record-remove "$PG_UNREGISTERED_DOMAIN" >/dev/null
+    set_pg_domain "$PG_UNREGISTERED_DOMAIN"
+    ok "사내 DNS 에 ${PG_UNREGISTERED_DOMAIN} 없음 — 체크아웃이 실패합니다 (로그: UnknownHostException / queryA ENOTFOUND)"
+    ok "해결 장면: './demo.sh pg-register' (사내 DNS 에 등록)"
+    ;;
+  pg-register)
+    pg_register
+    pg_status
     ;;
   pg-primary-down)
     if [[ "$CORP_DNS_MODE" == bastion ]]; then
@@ -202,20 +245,23 @@ case "${1:-}" in
     ;;
   pg-reset)
     if [[ "$CORP_DNS_MODE" == bastion ]]; then
-      corpdns record-add
+      corpdns record-add "$PG_DOMAIN" >/dev/null
+      corpdns record-remove "$PG_UNREGISTERED_DOMAIN" >/dev/null
       corpdns primary-up
-    else
-      kc -n "$APP_NS" delete netpol "$PG_NETPOL" --ignore-not-found >/dev/null
-      set_pg_domain "$PG_DOMAIN"
     fi
-    ok "PG 시나리오 복구"
+    kc -n "$APP_NS" delete netpol "$PG_NETPOL" --ignore-not-found >/dev/null
+    [[ "$(current_pg_domain)" == "$PG_DOMAIN" ]] || set_pg_domain "$PG_DOMAIN"
+    ok "PG 시나리오 복구 (앱 PG 도메인: ${PG_DOMAIN})"
+    if [[ "$CORP_DNS_MODE" == corporate ]] && pg_resolves_everywhere "$PG_UNREGISTERED_DOMAIN"; then
+      warn "사내 DNS 에 ${PG_UNREGISTERED_DOMAIN} 가 등록돼 있습니다 — 'pg-missing' 을 다시 시연하려면 이 레코드를 삭제해야 합니다"
+    fi
     ;;
   pg-status) pg_status ;;
   status)   status ;;
   firewall) show_firewall ;;
   traffic)  kc -n "$INFRA_NS" logs -f deploy/loadgen --tail=20 ;;
   *)
-    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
     ;;
 esac

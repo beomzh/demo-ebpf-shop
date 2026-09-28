@@ -714,7 +714,8 @@ dig @10.0.0.100 api-new.pg.example | grep status   # NXDOMAIN
 
 | 시연 | 스크립트 (DNS 는 그대로) | 실제 DNS 조작 (B 구성일 때) | 앱 로그 |
 | --- | --- | --- | --- |
-| 레코드 없음 | `./demo.sh pg-missing` — 주문·결제의 PG 도메인을 `PG_UNREGISTERED_DOMAIN` 으로 교체 | 주 DNS 존 파일에서 `api` 줄 삭제 + **SOA 시리얼 증가** → `sudo rndc reload` (보조에도 자동 반영) | `java.net.UnknownHostException … NXDOMAIN` / `queryA ENOTFOUND` |
+| 레코드 없음 (사건) | `./demo.sh pg-missing` — 주문·결제의 PG 도메인을 `PG_UNREGISTERED_DOMAIN` 으로 교체 | 주 DNS 존 파일에서 `api` 줄 삭제 + **SOA 시리얼 증가** → `sudo rndc reload` (보조에도 자동 반영) | `java.net.UnknownHostException … NXDOMAIN` / `queryA ENOTFOUND` |
+| 등록 (해결) | `./demo.sh pg-register` — 주·보조 모두에서 조회될 때까지 기다렸다가 회복 확인 | 주 DNS 존 파일에 `api-new  IN A  <PG_IP>` 추가 + 시리얼 증가 → `sudo rndc reload` (`pg-register` 를 먼저 띄워 두면 등록 순간 자동 감지) | 에러 로그가 멈추고 체크아웃 201 |
 | 주 DNS 장애 | `./demo.sh pg-primary-down` — 주 DNS 로 가는 패킷 차단 → **2초 타임아웃 후 보조** | 주 DNS 에서 `sudo systemctl stop named` → **즉시 연결 거부 후 보조** | `dns fallback … primary → ETIMEOUT`(또는 `ECONNREFUSED`) `\| secondary → IP` |
 | 복구 | `./demo.sh pg-reset` | 레코드 복구 + 시리얼 증가 + `rndc reload` / `sudo systemctl start named` | — |
 
@@ -910,12 +911,21 @@ oc scale deploy/loadgen -n demo-infra --replicas=3
 - 카드 혜택 조회는 선택 기능이라 실패해도 주문은 계속되고, 결제 승인이 실패하면 체크아웃이 실패합니다.
   그래서 같은 DNS 장애가 **Java 와 Node.js 로그에 각각 어떻게 찍히는지** 한 번에 볼 수 있습니다.
 
-| 명령 | 상황 | bastion 모드에서 실제로 하는 일 | corporate 모드에서 실제로 하는 일 | 사용자 결과 |
+**사건 → 원인 확인 → 해결** 순서로 시연합니다 (택배사 시나리오의 `incident → firewall → fix` 와 같은 흐름).
+
+> **이야기**: PG사가 API 도메인을 `api.pg.example` → `api-new.pg.example` 로 옮긴다고 공지했고, 개발팀은 새 도메인으로 설정을 바꿔 배포했다.
+> 그런데 사내 DNS 에 새 도메인 등록이 누락돼 결제가 전부 실패한다. 사내 DNS 에 등록하자 앱 재시작 없이 바로 회복된다.
+
+| 명령 | 단계 | bastion 모드에서 하는 일 | corporate 모드에서 하는 일 | 사용자 결과 |
 | --- | --- | --- | --- | --- |
-| `./demo.sh pg-missing` | 사내 DNS 에 PG 도메인이 없음 | 사내 DNS 존에서 레코드 삭제 | 주문·결제의 `PG_DOMAIN` 을 사내 DNS 에 없는 `PG_UNREGISTERED_DOMAIN` 으로 교체 (PG사 도메인 이전을 사내 DNS 에 등록 안 한 상황) | 체크아웃 **502**, 즉시 |
-| `./demo.sh pg-primary-down` | 사내 주 DNS 장애 | 주 DNS 컨테이너 일시정지 (안 되면 nftables 로 53 drop) | 주문·결제 → 주 DNS 패킷 drop (NetworkPolicy) | 체크아웃 **201**, 약 4초로 느려짐 |
-| `./demo.sh pg-reset` | 복구 | 레코드 복구, 주 DNS 재개 | 도메인 원복, 차단 정책 삭제 | 체크아웃 201, 수십 ms |
+| `./demo.sh pg-missing` | 사건 | 주문·결제의 PG 도메인을 `PG_UNREGISTERED_DOMAIN` 으로 교체(재시작) + 데모 사내 DNS 에 그 레코드가 없게 | 주문·결제의 PG 도메인을 `PG_UNREGISTERED_DOMAIN` 으로 교체(재시작) — 사내 DNS 에 없는 이름 | 체크아웃 **502**, 즉시 |
+| `./demo.sh pg-register` | **해결** | 데모 사내 DNS 에 새 도메인 A 레코드 등록 | 등록할 레코드를 안내하고, **주·보조 DNS 모두에서 조회될 때까지 기다림** (담당자가 등록하는 순간이 시연 장면) | **앱 재시작 없이** 체크아웃 201 로 회복 |
+| `./demo.sh pg-primary-down` | 별도 사건 | 주 DNS 컨테이너 일시정지 (안 되면 nftables 로 53 drop) | 주문·결제 → 주 DNS 패킷 drop (NetworkPolicy) | 체크아웃 **201**, 약 4초로 느려짐 |
+| `./demo.sh pg-reset` | 되돌리기 | 원래 도메인으로, 새 도메인 레코드 삭제, 주 DNS 재개 | 원래 도메인으로, 차단 정책 삭제 (사내 DNS 에 새 도메인이 남아 있으면 알려 줌) | 체크아웃 201 |
 | `./demo.sh pg-status` | 확인 | 서버별 조회 결과 + 체크아웃 1건 + 실패 경로 | 〃 | |
+
+- 앱은 PG 도메인을 매번 사내 DNS 에 묻고(Java 는 캐시 2초, 없는 이름은 캐시 안 함) PG 인증서에 새 도메인도 들어 있어서, **DNS 등록만으로 회복됩니다** (로컬에서 컨테이너 재시작 없이 502 → 201 확인).
+- corporate 모드에서 `pg-register` 는 사내 DNS 를 바꾸지 않습니다. 다음 테이크에서 `pg-missing` 을 다시 하려면 사내 DNS 에서 새 도메인 레코드를 지워야 합니다 (`pg-reset` 이 남아 있는지 알려 줌).
 
 택배사 시나리오(`incident`)와 독립적이라 함께 켜도 되지만, 화면이 섞이지 않게 하나씩 촬영하는 것을 권장합니다.
 
@@ -1022,11 +1032,12 @@ oc login ...               # 세션이 만료됐다면
 | `fix` | 방화벽에 새 IP 허용 | `scripts/scenario.sh fix` |
 | `reset` / `baseline` | 새 IP 규칙 삭제, DNS 를 예전 IP 로 | `scripts/scenario.sh reset` |
 | `traffic` | 부하 발생기 로그 실시간 | `scripts/scenario.sh traffic` |
-| `pg-missing` | PG 도메인 레코드 없음 재현 | `scripts/scenario.sh pg-missing` |
+| `pg-missing` | PG 새 도메인이 사내 DNS 에 없음 (사건) | `scripts/scenario.sh pg-missing` |
+| `pg-register` | 사내 DNS 에 새 도메인 등록 (해결). corporate 모드는 등록될 때까지 대기 | `scripts/scenario.sh pg-register` |
 | `pg-primary-down` | 사내 주 DNS 장애 재현 | `scripts/scenario.sh pg-primary-down` |
 | `pg-reset` | PG 시나리오 복구 | `scripts/scenario.sh pg-reset` |
 | `pg-status` | 사내 DNS 서버별 조회 + 체크아웃 1건 | `scripts/scenario.sh pg-status` |
-| `corpdns <명령>` | bastion 사내 DNS: `up`·`down`·`status`·`logs`·`record-remove`·`record-add`·`primary-down`·`primary-up` (root) | `corpdns-ext/run.sh` |
+| `corpdns <명령>` | bastion 사내 DNS: `up`·`down`·`status`·`logs`·`records`·`record-add [도메인]`·`record-remove [도메인]`·`primary-down`·`primary-up` (root) | `corpdns-ext/run.sh` |
 | `restart` | 여덟 서비스 재시작 | `demo.sh` |
 | `images` | ImageStream·태그·pull 주소 | `demo.sh` |
 | `cleanup` | `demo-shop`, `demo-infra` 삭제 (ImageStream 포함, 확인 질문 있음) | `scripts/cleanup.sh` |

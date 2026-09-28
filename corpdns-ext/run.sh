@@ -6,8 +6,9 @@
 #   sudo ./run.sh down            정지·삭제
 #   sudo ./run.sh status          상태와 현재 레코드
 #   sudo ./run.sh logs [primary|secondary]
-#   sudo ./run.sh record-remove   PG 도메인 레코드 삭제 → NXDOMAIN        (시나리오: 사내 DNS 에 외부 도메인 미등록)
-#   sudo ./run.sh record-add      PG 도메인 레코드 복구
+#   sudo ./run.sh record-remove [도메인]   레코드 삭제 → NXDOMAIN (기본: PG_DOMAIN)
+#   sudo ./run.sh record-add [도메인]      레코드 등록 → PG_IP     (기본: PG_DOMAIN)
+#   sudo ./run.sh records                  등록된 레코드 목록
 #   sudo ./run.sh primary-down    주 DNS 멈춤 (응답 없음 → 클라이언트 타임아웃) (시나리오: 주 DNS 장애)
 #   sudo ./run.sh primary-up      주 DNS 복구
 #
@@ -39,9 +40,12 @@ else echo "podman 또는 docker 가 필요합니다." >&2; exit 1; fi
 
 mkdir -p "$RENDER"
 
-# 존 파일: 루트(.) 존을 맡아 모든 이름에 권한 있는 응답을 한다 → 없는 이름은 NXDOMAIN
+# 레코드 목록: "<도메인> <IP>" 한 줄씩. 존 파일은 이 목록으로 만든다
+RECORDS="$RENDER/records"
+
+# 존 파일: 루트(.) 존을 맡아 모든 이름에 권한 있는 응답을 한다 → 목록에 없는 이름은 NXDOMAIN
 write_zone() {
-  local with_record="$1"
+  touch "$RECORDS"
   {
     echo "\$ORIGIN ."
     echo "\$TTL 5"
@@ -49,9 +53,26 @@ write_zone() {
     echo ".                 IN NS  ns1.corp.example."
     echo "ns1.corp.example. IN A   ${CORP_DNS_PRIMARY}"
     echo "ns2.corp.example. IN A   ${CORP_DNS_SECONDARY}"
-    [[ "$with_record" == yes ]] && echo "${PG_DOMAIN}.   IN A   ${PG_IP}"
+    while read -r name ip_; do
+      [[ -n "$name" ]] && echo "${name}.   IN A   ${ip_}"
+    done < "$RECORDS"
   } > "$RENDER/db.corp.tmp"
   mv "$RENDER/db.corp.tmp" "$RENDER/db.corp"   # 원자적으로 교체 (reload 가 반쯤 쓴 파일을 읽지 않게)
+}
+
+record_add() {
+  touch "$RECORDS"
+  grep -v "^$1 " "$RECORDS" > "$RECORDS.tmp" || true
+  echo "$1 ${PG_IP}" >> "$RECORDS.tmp"
+  mv "$RECORDS.tmp" "$RECORDS"
+  write_zone
+}
+
+record_remove() {
+  touch "$RECORDS"
+  grep -v "^$1 " "$RECORDS" > "$RECORDS.tmp" || true
+  mv "$RECORDS.tmp" "$RECORDS"
+  write_zone
 }
 
 write_corefile() {
@@ -87,7 +108,7 @@ port_holder() {
   ss -Hlnup 2>/dev/null | awk -v a="$1:$2" '{for (i = 1; i <= NF; i++) if ($i == a) { print $NF; exit }}'
 }
 
-has_record() { grep -q "^${PG_DOMAIN}\." "$RENDER/db.corp" 2>/dev/null; }
+has_record() { grep -q "^$1 " "$RECORDS" 2>/dev/null; }
 
 case "${1:-status}" in
   up)
@@ -110,7 +131,8 @@ case "${1:-status}" in
         exit 1
       fi
     done
-    write_zone yes
+    [[ -s "$RECORDS" ]] || echo "${PG_DOMAIN} ${PG_IP}" > "$RECORDS"   # 처음 기동: PG 도메인 등록
+    write_zone
     start_one primary "$CORP_DNS_PRIMARY"
     start_one secondary "$CORP_DNS_SECONDARY"
     sleep 2
@@ -128,18 +150,21 @@ case "${1:-status}" in
        || { command -v nft >/dev/null && nft list table inet corpdns_demo >/dev/null 2>&1; }; then
       echo "주 DNS: 응답 중지 상태 (primary-down)"
     fi
-    if has_record; then echo "레코드: ${PG_DOMAIN} → ${PG_IP}"; else echo "레코드: ${PG_DOMAIN} 없음 (NXDOMAIN)"; fi
+    echo "등록된 레코드:"; sed 's/^/  /; s/ \([0-9.]*\)$/ → \1/' "$RECORDS" 2>/dev/null || echo "  (없음)"
     ;;
   logs)
     "$ENGINE" logs -f "corp-dns-${2:-primary}"
     ;;
   record-remove)
-    write_zone no
-    echo "사내 DNS 에서 ${PG_DOMAIN} 레코드 삭제 → 2초 안에 NXDOMAIN"
+    record_remove "${2:-$PG_DOMAIN}"
+    echo "사내 DNS 에서 ${2:-$PG_DOMAIN} 레코드 삭제 → 2초 안에 NXDOMAIN"
     ;;
   record-add)
-    write_zone yes
-    echo "사내 DNS 에 ${PG_DOMAIN} → ${PG_IP} 레코드 복구"
+    record_add "${2:-$PG_DOMAIN}"
+    echo "사내 DNS 에 ${2:-$PG_DOMAIN} → ${PG_IP} 레코드 등록 (2초 안에 반영)"
+    ;;
+  records)
+    sed 's/ / → /' "$RECORDS" 2>/dev/null || echo "(없음)"
     ;;
   primary-down)
     # 1순위: 일시정지 — 소켓은 남아 있지만 응답하지 않는다 → 클라이언트는 타임아웃 후 보조 DNS 로 넘어간다
@@ -168,7 +193,7 @@ EOF
     echo "주 DNS(${CORP_DNS_PRIMARY}) 복구"
     ;;
   *)
-    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
     ;;
 esac

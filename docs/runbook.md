@@ -90,11 +90,12 @@ fw-delivery-default             배송 서비스 egress 기본 규칙: DNS 만 �
 
 | 순서 | 명령 | 화면 | 보여줄 것 | 말할 것 |
 | --- | --- | --- | --- | --- |
-| 1 | `./demo.sh pg-missing` | 결제·주문 서비스 상세 → DNS 탭 | `api.pg.example` 조회의 NXDOMAIN 증가 | 사내 DNS 에 PG 도메인이 없다 — 코드가 아니라 DNS 등록 문제 |
-| 2 | (터미널) `oc -n demo-shop logs deploy/order-service \| grep UnknownHost` | 애플리케이션 로그 | Java `java.net.UnknownHostException`, Node.js `queryA ENOTFOUND` | eBPF 가 먼저 보여준 원인을 앱 로그가 뒷받침한다 |
-| 3 | `./demo.sh pg-reset` → `./demo.sh pg-primary-down` | DNS 탭, 체크아웃 지연 | DNS 조회 지연·타임아웃, 체크아웃 약 4초 | 주 DNS 가 죽으면 보조로 넘어가지만 매번 2초씩 기다린다 |
-| 4 | (터미널) `… \| grep "dns fallback"` | 애플리케이션 로그 | `primary … → ETIMEOUT (2003ms) \| secondary … → IP` | 어느 DNS 가 죽었는지까지 로그에 남는다 |
-| 5 | `./demo.sh pg-reset` | | 지연 해소 | |
+| 1 | `./demo.sh pg-missing` | 결제·주문 서비스 상세 → DNS 탭 | 새 PG 도메인(`api-new…`) 조회의 NXDOMAIN 증가, 체크아웃 오류율 | PG사 도메인 이전 후 결제가 전부 실패 — 코드가 아니라 사내 DNS 등록 누락 |
+| 2 | (터미널) `kubectl -n demo-shop logs deploy/order-service --since=1m \| grep -A3 "target=pg("` | 애플리케이션 로그 | Java `java.net.UnknownHostException … NXDOMAIN`, Node.js `queryA ENOTFOUND` | eBPF 가 먼저 보여준 원인을 앱 로그가 뒷받침한다 |
+| 3 | `./demo.sh pg-register` (corporate: 담당자가 등록) | DNS 탭, 체크아웃 | NXDOMAIN 이 멈추고 체크아웃 정상 | 사내 DNS 에 등록하자 **앱 재시작 없이** 회복 |
+| 4 | `./demo.sh pg-reset` → `./demo.sh pg-primary-down` | DNS 탭, 체크아웃 지연 | DNS 조회 지연·타임아웃, 체크아웃 약 4초 | 주 DNS 가 죽으면 보조로 넘어가지만 매번 2초씩 기다린다 |
+| 5 | (터미널) `… \| grep "dns fallback"` | 애플리케이션 로그 | `primary … → ETIMEOUT (2003ms) \| secondary … → IP` | 어느 DNS 가 죽었는지까지 로그에 남는다 |
+| 6 | `./demo.sh pg-reset` | | 지연 해소 | |
 
 - 촬영 전 `./demo.sh pg-status` 로 주·보조 모두 PG 도메인을 돌려주는지, 체크아웃이 201 인지 확인합니다.
 - PG 호출(HTTPS)의 내용은 Java·Node.js 라 eBPF 로 볼 수 없습니다. 대본에서 "PG 호출 오류율" 대신 **DNS 탭의 NXDOMAIN·지연**으로 말합니다.
