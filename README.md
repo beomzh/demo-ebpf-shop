@@ -1062,7 +1062,7 @@ oc adm policy add-scc-to-user privileged -z <agent-serviceaccount> -n <agent-nam
 | --- | --- |
 | 경로 끝이 `pg(…) [… SSLHandshakeException …]` / `unable to verify the first certificate` | PG 인증서를 데모 CA 로 검증하지 못함 — `./demo.sh certs` 후 `sudo ./courier-ext/run.sh up`, `courier-ca` 시크릿이 같은 CA 인지 (`./demo.sh deploy`) |
 | 배포 후 체크아웃이 전부 502, 경로 끝이 `pg(api.pg.example) [ENOTFOUND …]` | 사내 DNS 에 PG 도메인이 없음 — `pg-missing` 을 켜 둔 상태인지(`./demo.sh pg-reset`), `./demo.sh corpdns records` |
-| 체크아웃이 전부 502, 경로 끝이 `member-service [ENOTFOUND …]` | 사내 DNS 의 `cluster.local` 전달이 안 됨 — 클러스터 도메인이 `cluster.local` 이 아닌지, 사내 DNS 파드 → 클러스터 DNS 통신 확인 |
+| 체크아웃이 전부 502, 경로 끝이 `member-service [ENOTFOUND …]` | 사내 DNS 의 `cluster.local` 전달이 안 됨 — 사내 DNS 파드가 예전 설정으로 떠 있으면 `kubectl -n demo-infra rollout restart statefulset ns1-corp-dns ns2-corp-dns` (지금 버전의 `deploy` 는 설정이 바뀌면 자동 재시작). 그래도 안 되면 클러스터 도메인이 `cluster.local` 인지, 사내 DNS 파드 → 클러스터 DNS 통신 확인 |
 | 요청이 항상 2초씩 느림 | 주 DNS 가 없고 CNI 가 질의를 버리는 중 — `dns-primary-down` 상태인지(`./demo.sh dns-primary-up`) |
 | 택배사·PG 연결이 됐다 안 됐다 함 | 같은 데모용 IP 가 두 서버에 붙어 있음 → ['주의'](#주의-같은-ip-를-두-서버에-붙이지-마세요) |
 | `check` 의 `[클러스터 → PG] … HTTP 404` | `PG_IP` 가 nginx 가 듣는 IP 가 아님 (다른 웹서버가 응답) → `PG_IP=` 로 비우기 |

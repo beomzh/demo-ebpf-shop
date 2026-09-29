@@ -20,7 +20,11 @@ P="$CORP_DNS_PRIMARY_NAME" S2="$CORP_DNS_SECONDARY_NAME"
 
 corp_up() {
   info "사내 DNS 파드 배포 (주 ${P}, 보조 ${S2})"
+  # CoreDNS 는 기동할 때만 Corefile 을 읽으므로, 설정이 바뀌었으면 아래에서 파드를 재시작한다
+  local before after
+  before="$(kc -n "$INFRA_NS" get configmap corp-dns-corefile -o jsonpath='{.data}' 2>/dev/null || true)"
   render "$ROOT/k8s/45-corp-dns.yaml" | kc apply -f - >/dev/null
+  after="$(kc -n "$INFRA_NS" get configmap corp-dns-corefile -o jsonpath='{.data}' 2>/dev/null || true)"
   CORP_DNS_PRIMARY="$(corp_dns_svc_ip "$P")"
   CORP_DNS_SECONDARY="$(corp_dns_svc_ip "$S2")"
   [[ -n "$CORP_DNS_PRIMARY" && -n "$CORP_DNS_SECONDARY" ]] || die "사내 DNS 서비스 ClusterIP 를 가져오지 못했습니다."
@@ -36,6 +40,10 @@ corp_up() {
     records="$(printf '%s\n%s %s' "$records" "$COURIER_DOMAIN" "$COURIER_OLD_IP")"
   fi
   corp_zone_apply "$records"
+  if [[ -n "$before" && "$before" != "$after" ]]; then
+    info "사내 DNS 설정(Corefile)이 바뀜 → 파드 재시작"
+    kc -n "$INFRA_NS" rollout restart "statefulset/$P" "statefulset/$S2" >/dev/null
+  fi
   kc -n "$INFRA_NS" rollout status "statefulset/$P" --timeout=120s >/dev/null
   kc -n "$INFRA_NS" rollout status "statefulset/$S2" --timeout=120s >/dev/null
   ok "사내 DNS: 주 ${P} ${CORP_DNS_PRIMARY}, 보조 ${S2} ${CORP_DNS_SECONDARY}"
