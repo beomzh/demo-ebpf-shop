@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 쇼핑몰 여덟 서비스 + MySQL·Redis + 데모 장치(택배사 DNS, 사내 DNS(cluster 모드), 방화벽, 부하 발생기)를 배포한다.
-# 배포 직후 상태 = "월요일 밤 이전" 정상 상태 (DNS → 예전 IP, 방화벽 → 예전 IP 허용)
+# 쇼핑몰 여덟 서비스 + MySQL·Redis + 데모 장치(사내 DNS(cluster 모드), 방화벽, 부하 발생기)를 배포한다.
+# 배포 직후 상태 = "월요일 밤 이전" 정상 상태 (사내 DNS 의 택배사 레코드 → 예전 IP, 방화벽 → 예전 IP 허용)
 source "$(dirname "$0")/lib.sh"
 load_env
 
@@ -45,12 +45,9 @@ else
     --from-literal=REDIS_PASSWORD="$(openssl rand -hex 16)" >/dev/null
 fi
 
-info "courier-dns (택배사 도메인 → ${COURIER_OLD_IP})"
-render "$K/40-courier-dns.yaml" | kc apply -f -
-kc -n "$INFRA_NS" rollout status deploy/courier-dns --timeout=120s
-dns_ip="$(courier_dns_ip)"
-[[ -n "$dns_ip" ]] || die "courier-dns ClusterIP 를 가져오지 못했습니다."
-info "courier-dns ClusterIP = ${dns_ip}"
+# 예전 버전의 택배사 전용 DNS(courier-dns)가 남아 있으면 지운다 — 택배사 도메인도 사내 DNS 가 답한다
+kc -n "$INFRA_NS" delete deploy/courier-dns svc/courier-dns cm/courier-dns-corefile cm/courier-hosts \
+  netpol/allow-courier-dns-from-delivery --ignore-not-found >/dev/null 2>&1 || true
 
 if [[ "$CORP_DNS_MODE" == cluster ]]; then
   "$ROOT/scripts/corpdns.sh" up
@@ -58,15 +55,15 @@ if [[ "$CORP_DNS_MODE" == cluster ]]; then
   CORP_DNS_SECONDARY="$(corp_dns_svc_ip "$CORP_DNS_SECONDARY_NAME")"
 fi
 [[ -n "$CORP_DNS_PRIMARY" && -n "$CORP_DNS_SECONDARY" ]] || die "사내 DNS 주소가 비어 있습니다."
-info "결제 서비스 사내 DNS: $(pg_dns_servers)"
+info "사내 DNS (결제 → PG 도메인, 배송 → 택배사 도메인): $(pg_dns_servers)"
 
 info "mysql + redis + 여덟 서비스"
 render "$K/10-mysql.yaml" | kc apply -f -
 render "$K/15-redis.yaml" | kc apply -f -
 render "$K/20-services.yaml" | kc apply -f -
-render "$K/30-delivery.yaml" "$dns_ip" | kc apply -f -
+render "$K/30-delivery.yaml" | kc apply -f -
 
-info "방화벽 (배송 서비스 egress: 택배사 DNS + ${COURIER_OLD_IP}:443)"
+info "방화벽 (배송 서비스 egress: 사내 DNS + ${COURIER_OLD_IP}:443)"
 render "$K/50-firewall.yaml" | kc apply -f -
 
 info "서비스 간 인바운드 격리 (필요한 호출 경로만 허용)"

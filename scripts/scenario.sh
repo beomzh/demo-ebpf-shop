@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # 사건 시나리오 전환 스크립트
 #
-#   baseline   정상 상태        DNS → 예전 IP, 방화벽: 예전 IP 만 허용       (월요일 밤 이전)
-#   incident   사건 발생        DNS → 새 IP,   방화벽: 예전 IP 만 허용       (월요일 밤: 택배사가 IP 변경)
+#   baseline   정상 상태        사내 DNS 의 택배사 레코드 → 예전 IP, 방화벽: 예전 IP 만 허용   (월요일 밤 이전)
+#   incident   사건 발생        사내 DNS 의 택배사 레코드 → 새 IP,   방화벽: 예전 IP 만 허용   (월요일 밤: 택배사가 IP 변경)
 #   fix        해결             방화벽에 새 IP 허용 규칙 추가                (화요일 09:40)
 #   reset      baseline 과 같음 (다음 촬영 준비)
 #   status     현재 DNS 응답·방화벽 규칙·연결 가능 여부·배송 조회 결과 요약
@@ -21,14 +21,32 @@ load_env
 
 NEW_RULE="fw-allow-courier-$(dashed "$COURIER_NEW_IP")"
 
+# 택배사 도메인은 사내 DNS(주·보조)의 A 레코드 한 줄이다. 택배사가 IP 를 바꾸면 이 레코드가 바뀐다
 set_courier_ip() {
-  local ip="$1"
-  info "택배사 DNS: ${COURIER_DOMAIN} → ${ip}"
-  kc -n "$INFRA_NS" create configmap courier-hosts \
-    --from-literal="courier.hosts=${ip} ${COURIER_DOMAIN}" --dry-run=client -o yaml | kc apply -f - >/dev/null
-  # ConfigMap 볼륨 전파(최대 ~1분)를 기다리지 않도록 재시작해 즉시 반영
-  kc -n "$INFRA_NS" rollout restart deploy/courier-dns >/dev/null
-  kc -n "$INFRA_NS" rollout status deploy/courier-dns --timeout=120s >/dev/null
+  local ip="$1" waited=0
+  info "사내 DNS: ${COURIER_DOMAIN} → ${ip}"
+  if managed_dns; then
+    corpdns record-add "$COURIER_DOMAIN" "$ip" >/dev/null
+    return
+  fi
+  # corporate: 실제 사내 DNS 는 건드리지 않는다 → 담당자가 바꿀 때까지 기다림
+  courier_resolves_to "$ip" && return
+  info "사내 DNS 담당자에게 요청할 내용 (주 ${CORP_DNS_PRIMARY}, 보조 ${CORP_DNS_SECONDARY} 모두):"
+  echo "    A 레코드  ${COURIER_DOMAIN}  →  ${ip}   (TTL 5~60초)"
+  until courier_resolves_to "$ip"; do
+    (( waited >= 600 )) && die "600초 안에 사내 DNS 에서 ${COURIER_DOMAIN} → ${ip} 가 조회되지 않았습니다"
+    sleep 5; waited=$((waited + 5))
+  done
+}
+
+# 사내 DNS 가 택배사 도메인을 ip 로 답하면 0 (응답하는 서버 기준)
+courier_resolves_to() {
+  local out; out="$(pg_dns_query "$COURIER_DOMAIN" 2>/dev/null)" || return 1
+  [[ -n "$out" ]] && printf '%s\n' "$out" | awk -v ip="$1" '
+    $3 ~ /^(TIMEOUT|CONNREFUSED)/ { next }
+    { answered = 1 }
+    $3 != ip { bad = 1 }
+    END { exit (bad || !answered) }'
 }
 
 allow_new_ip() {
@@ -66,8 +84,8 @@ show_firewall() {
 }
 
 status() {
-  info "택배사 DNS 설정 (courier-hosts)"
-  kc -n "$INFRA_NS" get configmap courier-hosts -o jsonpath='{.data.courier\.hosts}'; echo
+  info "사내 DNS 의 택배사 레코드 (서버별 조회)"
+  pg_dns_query "$COURIER_DOMAIN" | sed "s/^/  /; s/ \([^ ]*\) \([^ ]*ms\)$/  ${COURIER_DOMAIN} → \1 (\2)/" || warn "payment-service exec 실패"
 
   info "배송 서비스 파드에서 본 DNS 응답과 443 연결 (3초 제한)"
   kc -n "$APP_NS" exec deploy/delivery-service -- python -c "

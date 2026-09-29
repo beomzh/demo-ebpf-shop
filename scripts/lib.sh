@@ -150,8 +150,8 @@ ca_fingerprint() {
   openssl x509 -in "$f" -noout -fingerprint -sha256 2>/dev/null | sed 's/.*=//; s/://g' | tr 'A-F' 'a-f' | cut -c1-16
 }
 
-# render <manifest> [COURIER_DNS_IP] → stdout
-# __NONOCP_RUN_AS_USER__ : 이미지의 USER 가 숫자가 아닌 파드(loadgen, courier-dns)용.
+# render <manifest> → stdout
+# __NONOCP_RUN_AS_USER__ : 이미지의 USER 가 숫자가 아닌 파드(loadgen, 사내 DNS)용.
 #   OpenShift 는 UID 를 자동 부여하므로 줄을 지우고, 그 밖의 쿠버네티스는 runAsUser 를 넣는다
 render() {
   local reg uid_rule; reg="$(pull_registry)"
@@ -163,7 +163,10 @@ render() {
     -e "s#__COURIER_DOMAIN__#${COURIER_DOMAIN}#g" \
     -e "s#__COURIER_OLD_IP_DASHED__#$(dashed "$COURIER_OLD_IP")#g" \
     -e "s#__COURIER_OLD_IP__#${COURIER_OLD_IP}#g" \
-    -e "s#__COURIER_DNS_IP__#${2:-__COURIER_DNS_IP__}#g" \
+    -e "s#__CORP_DNS_PRIMARY__#${CORP_DNS_PRIMARY}#g" \
+    -e "s#__CORP_DNS_SECONDARY__#${CORP_DNS_SECONDARY}#g" \
+    -e "s#__CORP_DNS_PEERS__#$(corp_dns_peers)#g" \
+    -e "s#__CORP_DNS_PORT__#$(corp_dns_port)#g" \
     -e "s#__LOADGEN_ORDER_INTERVAL__#${LOADGEN_ORDER_INTERVAL}#g" \
     -e "s#__LOADGEN_TRACKING_INTERVAL__#${LOADGEN_TRACKING_INTERVAL}#g" \
     -e "s#__LOADGEN_REPLICAS__#${LOADGEN_REPLICAS}#g" \
@@ -174,9 +177,17 @@ render() {
     "$1"
 }
 
-courier_dns_ip() {
-  kc -n "$INFRA_NS" get svc courier-dns -o jsonpath='{.spec.clusterIP}'
+# 배송 서비스 방화벽(50-firewall.yaml)의 사내 DNS 허용 대상 — 한 줄짜리 YAML 목록
+#   cluster: 사내 DNS 파드 (NetworkPolicy 는 DNAT 뒤의 파드 IP·포트로 판단하므로 ClusterIP 가 아니라 파드를 지정)
+#   bastion·corporate: 사내 DNS IP 2개
+corp_dns_peers() {
+  if [[ "$CORP_DNS_MODE" == cluster ]]; then
+    echo "[{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ${INFRA_NS} } }, podSelector: { matchLabels: { app: corp-dns } } }]"
+  else
+    echo "[{ ipBlock: { cidr: ${CORP_DNS_PRIMARY}/32 } }, { ipBlock: { cidr: ${CORP_DNS_SECONDARY}/32 } }]"
+  fi
 }
+corp_dns_port() { [[ "$CORP_DNS_MODE" == cluster ]] && echo 1053 || echo 53; }
 
 # ── 사내 DNS (PG 시나리오) ───────────────────────────────────
 corp_dns_svc_ip() {

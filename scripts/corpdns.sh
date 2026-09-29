@@ -9,7 +9,7 @@
 #   status                  파드·서비스 IP·주 DNS 차단 여부·레코드
 #   logs [primary|secondary|all]   질의 로그 (기본 all: 두 서버를 한 화면에 → 주 → 보조 전환 확인)
 #   records                 등록된 레코드 목록
-#   record-add [도메인]     레코드 등록 → PG_IP (기본: PG_DOMAIN)
+#   record-add [도메인] [IP]  레코드 등록·변경 (기본: PG_DOMAIN → PG_IP). 택배사 IP 변경은 incident 가 이걸로 한다
 #   record-remove [도메인]  레코드 삭제 → NXDOMAIN (기본: PG_DOMAIN)
 #   primary-down            주 DNS 장애: 결제 → 주 DNS 허용 정책 삭제 → 질의가 버려짐 (응답 없음 → 결제 서비스는 2초 뒤 보조 DNS 로)
 #   primary-up              주 DNS 복구
@@ -28,6 +28,7 @@ load_env
 
 cmd="${1:-status}"
 arg="${2:-}"
+arg_ip="${3:-}"
 P="$CORP_DNS_PRIMARY_NAME" S2="$CORP_DNS_SECONDARY_NAME"
 
 corp_up() {
@@ -38,10 +39,14 @@ corp_up() {
   [[ -n "$CORP_DNS_PRIMARY" && -n "$CORP_DNS_SECONDARY" ]] || die "사내 DNS 서비스 ClusterIP 를 가져오지 못했습니다."
   local records; records="$(corp_records)"
   if [[ -z "$records" ]]; then
-    records="${PG_DOMAIN} ${PG_IP}"   # 처음 배포: PG 도메인만 등록
-    info "존 생성: ${PG_DOMAIN} → ${PG_IP}"
+    records="${PG_DOMAIN} ${PG_IP}"   # 처음 배포: PG 도메인 + 택배사 도메인(예전 IP)
+    info "존 생성: ${PG_DOMAIN} → ${PG_IP}, ${COURIER_DOMAIN} → ${COURIER_OLD_IP}"
   else
     info "기존 레코드 유지"
+  fi
+  # 택배사 도메인 레코드가 없으면 예전 IP 로 넣는다 (courier-dns 를 쓰던 버전에서 올라온 경우 포함)
+  if ! printf '%s\n' "$records" | awk -v d="$COURIER_DOMAIN" '$1 == d { f = 1 } END { exit !f }'; then
+    records="$(printf '%s\n%s %s' "$records" "$COURIER_DOMAIN" "$COURIER_OLD_IP")"
   fi
   corp_zone_apply "$records"
   kc -n "$INFRA_NS" rollout status "statefulset/$P" --timeout=120s >/dev/null
@@ -49,7 +54,7 @@ corp_up() {
   ok "사내 DNS: 주 ${P} ${CORP_DNS_PRIMARY}, 보조 ${S2} ${CORP_DNS_SECONDARY}"
 }
 
-# wait_zone <도메인> <present|absent> : 응답하는 서버가 모두 기대한 결과를 낼 때까지 기다린다 (주 DNS 차단 중이면 그 서버는 건너뜀)
+# wait_zone <도메인> <present|absent|IP> : 응답하는 서버가 모두 기대한 결과를 낼 때까지 기다린다 (주 DNS 차단 중이면 그 서버는 건너뜀)
 wait_zone() {
   local d="$1" want="$2" waited=0 out
   kc -n "$APP_NS" get deploy payment-service >/dev/null 2>&1 || return 0
@@ -58,6 +63,7 @@ wait_zone() {
     if [[ -n "$out" ]] && printf '%s\n' "$out" | awk -v want="$want" '
         $3 ~ /^(TIMEOUT|CONNREFUSED)/ { next }
         want == "present" && $3 !~ /^[0-9.,]+$/ { bad = 1 }
+        want ~ /^[0-9.]+$/ && $3 != want        { bad = 1 }
         want == "absent"  && $3 !~ /^NXDOMAIN/  { bad = 1 }
         END { exit bad }'; then
       return 0
@@ -109,10 +115,10 @@ case "$cmd" in
     ;;
   records) corp_records | sed '/^$/d; s/ / → /' ;;
   record-add)
-    d="${arg:-$PG_DOMAIN}"
-    corp_zone_apply "$(corp_records | awk -v d="$d" 'NF && $1 != d'; echo "$d $PG_IP")"
-    wait_zone "$d" present
-    ok "사내 DNS 에 ${d} → ${PG_IP} 등록 (주·보조 반영)"
+    d="${arg:-$PG_DOMAIN}" ip="${arg_ip:-$PG_IP}"
+    corp_zone_apply "$(corp_records | awk -v d="$d" 'NF && $1 != d'; echo "$d $ip")"
+    wait_zone "$d" "$ip"
+    ok "사내 DNS 에 ${d} → ${ip} 등록 (주·보조 반영)"
     ;;
   record-remove)
     d="${arg:-$PG_DOMAIN}"

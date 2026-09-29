@@ -3,7 +3,7 @@
 영상별로 **촬영 직전에 무엇을 실행하고, 화면에서 무엇을 보여주고, 어떻게 말하는지**를 정리한 문서입니다.
 준비·배포는 [README](../README.md)를 먼저 보세요.
 
-- Observ 화면에서는 네임스페이스 필터를 **`demo-shop`** 으로 둡니다. (`demo-infra` 의 부하 발생기·DNS 는 데모 장치입니다)
+- Observ 화면에서는 네임스페이스 필터를 **`demo-shop`** 으로 둡니다. (`demo-infra` 의 부하 발생기·사내 DNS 는 데모 장치입니다)
 - 트랜잭션 조회의 소스 토글은 **eBPF** 로 둡니다.
 
 ---
@@ -12,7 +12,7 @@
 
 ```bash
 ./demo.sh deploy          # 배포 직후 = 정상 상태
-./demo.sh status          # DNS → 예전 IP, TCP 연결 성공, 배송 조회 HTTP 200
+./demo.sh status          # 사내 DNS 택배사 레코드 → 예전 IP, TCP 연결 성공, 배송 조회 HTTP 200
 ```
 
 - 최소 몇 시간, 가능하면 하루 이상 그대로 둡니다. 데모 3에서 조회 기간을 넓혀 예전 IP 로 정상 연결되던 모습과 비교합니다.
@@ -21,7 +21,7 @@
 ## 1. 사건 발생 — 촬영 시작 15~30분 전
 
 ```bash
-./demo.sh incident        # 택배사가 IP 변경 (DNS → 새 IP). 방화벽은 예전 IP 만 허용된 상태
+./demo.sh incident        # 택배사가 IP 변경 (사내 DNS 의 택배사 레코드 → 새 IP). 방화벽은 예전 IP 만 허용된 상태
 ./demo.sh status          # DNS → 새 IP, TCP 연결 실패, 배송 조회 HTTP 502 약 5초
 ```
 
@@ -54,7 +54,7 @@
 ```
 RULE                            DESCRIPTION
 fw-allow-courier-10-0-0-61      택배사 API (api.courier.example) 10.0.0.61:443 허용
-fw-delivery-default             배송 서비스 egress 기본 규칙: DNS 만 허용, 그 외 차단
+fw-delivery-default             배송 서비스 egress 기본 규칙: 사내 DNS 만 허용, 그 외 차단
 ```
 
 ## 영상 ③ 해결과 표준화 (10분) — 데모 4
@@ -77,7 +77,7 @@ fw-delivery-default             배송 서비스 egress 기본 규칙: DNS 만 �
 ## 다음 테이크 준비
 
 ```bash
-./demo.sh reset           # 방화벽 새 IP 규칙 삭제, DNS → 예전 IP
+./demo.sh reset           # 방화벽 새 IP 규칙 삭제, 사내 DNS 택배사 레코드 → 예전 IP
 # 정상 데이터가 몇 분 쌓인 뒤
 ./demo.sh incident
 ```

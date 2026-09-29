@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # 가상 "사내 DNS" (주 DNS + 보조 DNS) — bastion 등 클러스터 밖 호스트에서 실행한다 (CORP_DNS_MODE=bastion).
-# 외부 PG사 도메인(PG_DOMAIN)을 PG_IP 로 답하고, 없는 이름에는 NXDOMAIN 을 돌려준다 (실제 사내 DNS 처럼 권한 있는 응답).
+# 외부 PG사 도메인(PG_DOMAIN → PG_IP)과 택배사 도메인(COURIER_DOMAIN → 예전 IP)을 답하고,
+# 없는 이름에는 NXDOMAIN 을 돌려준다 (실제 사내 DNS 처럼 권한 있는 응답).
 #
 #   sudo ./run.sh up              주·보조 DNS 기동 (CORP_DNS_PRIMARY / CORP_DNS_SECONDARY 의 53 에서만 받음)
 #   sudo ./run.sh down            정지·삭제
 #   sudo ./run.sh status          상태와 현재 레코드
 #   sudo ./run.sh logs [primary|secondary]
 #   sudo ./run.sh record-remove [도메인]   레코드 삭제 → NXDOMAIN (기본: PG_DOMAIN)
-#   sudo ./run.sh record-add [도메인]      레코드 등록 → PG_IP     (기본: PG_DOMAIN)
+#   sudo ./run.sh record-add [도메인] [IP] 레코드 등록·변경          (기본: PG_DOMAIN → PG_IP)
 #   sudo ./run.sh records                  등록된 레코드 목록
 #   sudo ./run.sh primary-down    주 DNS 멈춤 (응답 없음 → 클라이언트 타임아웃) (시나리오: 주 DNS 장애)
 #   sudo ./run.sh primary-up      주 DNS 복구
 #
 # 설정은 ../demo.env 에서 읽는다 (환경변수로 덮어쓸 수 있음):
-#   CORP_DNS_PRIMARY, CORP_DNS_SECONDARY, PG_DOMAIN, PG_IP(비우면 COURIER_OLD_IP)
+#   CORP_DNS_PRIMARY, CORP_DNS_SECONDARY, PG_DOMAIN, PG_IP(비우면 COURIER_OLD_IP), COURIER_DOMAIN, COURIER_OLD_IP
 # 두 IP 는 호스트에 미리 붙어 있어야 한다 (../courier-ext/setup-ips.sh). 53 은 특권 포트라 root 로 실행한다.
 set -euo pipefail
 
@@ -24,11 +25,12 @@ RENDER=.rendered
 if [[ -f ../demo.env ]]; then
   # shellcheck disable=SC1091
   eval "$(set -a; source ../demo.env; set +a; \
-    printf 'CORP_DNS_PRIMARY=%q CORP_DNS_SECONDARY=%q PG_DOMAIN=%q PG_IP=%q COURIER_OLD_IP=%q' \
-      "${CORP_DNS_PRIMARY:-}" "${CORP_DNS_SECONDARY:-}" "${PG_DOMAIN:-}" "${PG_IP:-}" "${COURIER_OLD_IP:-}")"
+    printf 'CORP_DNS_PRIMARY=%q CORP_DNS_SECONDARY=%q PG_DOMAIN=%q PG_IP=%q COURIER_OLD_IP=%q COURIER_DOMAIN=%q' \
+      "${CORP_DNS_PRIMARY:-}" "${CORP_DNS_SECONDARY:-}" "${PG_DOMAIN:-}" "${PG_IP:-}" "${COURIER_OLD_IP:-}" "${COURIER_DOMAIN:-}")"
 fi
 PG_DOMAIN="${PG_DOMAIN:-api.pg.example}"
 PG_IP="${PG_IP:-${COURIER_OLD_IP:-}}"
+COURIER_DOMAIN="${COURIER_DOMAIN:-api.courier.example}"
 : "${CORP_DNS_PRIMARY:?CORP_DNS_PRIMARY 가 필요합니다 (demo.env)}"
 : "${CORP_DNS_SECONDARY:?CORP_DNS_SECONDARY 가 필요합니다 (demo.env)}"
 : "${PG_IP:?PG_IP 또는 COURIER_OLD_IP 가 필요합니다 (demo.env)}"
@@ -60,10 +62,10 @@ write_zone() {
   mv "$RENDER/db.corp.tmp" "$RENDER/db.corp"   # 원자적으로 교체 (reload 가 반쯤 쓴 파일을 읽지 않게)
 }
 
-record_add() {
+record_add() {   # record_add <도메인> [IP]
   touch "$RECORDS"
   grep -v "^$1 " "$RECORDS" > "$RECORDS.tmp" || true
-  echo "$1 ${PG_IP}" >> "$RECORDS.tmp"
+  echo "$1 ${2:-$PG_IP}" >> "$RECORDS.tmp"
   mv "$RECORDS.tmp" "$RECORDS"
   write_zone
 }
@@ -132,12 +134,14 @@ case "${1:-status}" in
       fi
     done
     [[ -s "$RECORDS" ]] || echo "${PG_DOMAIN} ${PG_IP}" > "$RECORDS"   # 처음 기동: PG 도메인 등록
+    has_record "$COURIER_DOMAIN" || { : "${COURIER_OLD_IP:?COURIER_OLD_IP 가 필요합니다 (demo.env)}"; echo "${COURIER_DOMAIN} ${COURIER_OLD_IP}" >> "$RECORDS"; }
     write_zone
     start_one primary "$CORP_DNS_PRIMARY"
     start_one secondary "$CORP_DNS_SECONDARY"
     sleep 2
     "$ENGINE" ps --filter name=corp-dns --format '{{.Names}}\t{{.Status}}'
-    echo "사내 DNS: primary ${CORP_DNS_PRIMARY}, secondary ${CORP_DNS_SECONDARY}  |  ${PG_DOMAIN} → ${PG_IP}"
+    echo "사내 DNS: primary ${CORP_DNS_PRIMARY}, secondary ${CORP_DNS_SECONDARY}"
+    sed 's/^/  /; s/ \([0-9.]*\)$/ → \1/' "$RECORDS"
     ;;
   down)
     "$ENGINE" rm -f corp-dns-primary corp-dns-secondary >/dev/null 2>&1 || true
@@ -160,8 +164,8 @@ case "${1:-status}" in
     echo "사내 DNS 에서 ${2:-$PG_DOMAIN} 레코드 삭제 → 2초 안에 NXDOMAIN"
     ;;
   record-add)
-    record_add "${2:-$PG_DOMAIN}"
-    echo "사내 DNS 에 ${2:-$PG_DOMAIN} → ${PG_IP} 레코드 등록 (2초 안에 반영)"
+    record_add "${2:-$PG_DOMAIN}" "${3:-}"
+    echo "사내 DNS 에 ${2:-$PG_DOMAIN} → ${3:-$PG_IP} 레코드 등록 (2초 안에 반영)"
     ;;
   records)
     sed 's/ / → /' "$RECORDS" 2>/dev/null || echo "(없음)"

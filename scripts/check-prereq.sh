@@ -110,40 +110,54 @@ for ip in "$COURIER_OLD_IP" "$COURIER_NEW_IP"; do
   fi
 done
 
-info "5) 사내 DNS (${CORP_DNS_MODE} 모드) 와 외부 PG — 클러스터 안(임시 파드)에서"
-dns_ips=("$CORP_DNS_PRIMARY" "$CORP_DNS_SECONDARY")
+info "5) 사내 DNS (${CORP_DNS_MODE} 모드) — PG 도메인·택배사 도메인, 그리고 외부 PG — 클러스터 안에서"
+# 사내 DNS 가 답해야 하는 레코드: "도메인 기대IP"
+dns_expect=("${PG_DOMAIN} ${PG_IP}" "${COURIER_DOMAIN} ${COURIER_OLD_IP}")
+dns_hint() {   # dns_hint <도메인> <IP>
+  if [[ "$1" == "$COURIER_DOMAIN" ]]; then
+    echo "택배사 레코드는 정상 상태에서 예전 IP(${COURIER_OLD_IP}) 여야 함 (incident 중이면 새 IP 가 정상 — './demo.sh reset')"
+  elif [[ "$CORP_DNS_MODE" == cluster ]]; then
+    echo "'./demo.sh corpdns status' 로 파드·레코드·주 DNS 차단 여부 확인 ('./demo.sh pg-reset' 으로 복구)"
+  elif [[ "$CORP_DNS_MODE" == bastion ]]; then
+    echo "bastion 에서 './demo.sh corpdns up' 했는지, IP 가 붙어 있는지 확인 (README 5-5b)"
+  else
+    echo "사내 DNS 에 $1 → $2 A 레코드 등록, 노드에서 사내 DNS 53/udp 로 갈 수 있는지 확인 (README 5-5b)"
+  fi
+}
 if [[ "$CORP_DNS_MODE" == cluster ]]; then
-  # 사내 DNS 파드는 결제 서비스만 들어올 수 있으므로(demo-infra 인바운드 기본 차단) 결제 파드에서 조회한다
-  dns_ips=()
+  # 사내 DNS 파드는 결제·배송 서비스만 들어올 수 있으므로(demo-infra 인바운드 기본 차단) 결제 파드에서 조회한다
   if [[ -z "$CORP_DNS_PRIMARY" ]] || ! kc -n "$APP_NS" get deploy payment-service >/dev/null 2>&1; then
     info "  cluster 모드: 사내 DNS 파드(${CORP_DNS_PRIMARY_NAME}, ${CORP_DNS_SECONDARY_NAME})는 deploy 때 만들어집니다 (조회 점검은 배포 후 다시 check)"
   else
-    while read -r role server result _; do
-      if [[ "$result" == *"$PG_IP"* ]]; then
-        ok "  [결제 → 사내 DNS ${role} ${server}] ${PG_DOMAIN} → ${result} OK"
+    for pair in "${dns_expect[@]}"; do
+      read -r domain want <<<"$pair"
+      while read -r role server result _; do
+        if [[ "$result" == "$want" ]]; then
+          ok "  [결제 파드 → 사내 DNS ${role} ${server}] ${domain} → ${result} OK"
+        else
+          warn "  [결제 파드 → 사내 DNS ${role} ${server}] ${domain} → ${result} (기대: ${want})"
+          warn "      → $(dns_hint "$domain" "$want")"
+          fail=1
+        fi
+      done < <(pg_dns_query "$domain" 2>&1 || echo "? payment-service exec-실패 -")
+    done
+  fi
+else
+  for dns_ip in "$CORP_DNS_PRIMARY" "$CORP_DNS_SECONDARY"; do
+    for pair in "${dns_expect[@]}"; do
+      read -r domain want <<<"$pair"
+      out="$(probe corpdns-probe docker.io/library/busybox:1.36 \
+             nslookup -type=a -timeout=2 "$domain" "$dns_ip" 2>&1 || true)"
+      if printf '%s' "$out" | grep -q "Address: ${want}\b"; then
+        ok "  [클러스터 → 사내 DNS ${dns_ip}] ${domain} → ${want} OK"
       else
-        warn "  [결제 → 사내 DNS ${role} ${server}] ${PG_DOMAIN} 조회 실패: ${result}"
-        warn "      → './demo.sh corpdns status' 로 파드·레코드·주 DNS 차단 여부 확인 ('./demo.sh pg-reset' 으로 복구)"
+        warn "  [클러스터 → 사내 DNS ${dns_ip}] ${domain} 조회 실패: $(clean_probe "$(printf '%s\n' "$out" | grep -vE '^(Server:|Address:.*[#:]53$|$)')")"
+        warn "      → $(dns_hint "$domain" "$want")"
         fail=1
       fi
-    done < <(pg_dns_query "$PG_DOMAIN" 2>&1 || echo "? payment-service exec-실패 -")
-  fi
+    done
+  done
 fi
-for dns_ip in ${dns_ips[@]+"${dns_ips[@]}"}; do
-  out="$(probe corpdns-probe docker.io/library/busybox:1.36 \
-         nslookup -type=a -timeout=2 "$PG_DOMAIN" "$dns_ip" 2>&1 || true)"
-  if printf '%s' "$out" | grep -q "Address: ${PG_IP}\b"; then
-    ok "  [클러스터 → 사내 DNS ${dns_ip}] ${PG_DOMAIN} → ${PG_IP} OK"
-  else
-    warn "  [클러스터 → 사내 DNS ${dns_ip}] ${PG_DOMAIN} 조회 실패: $(clean_probe "$(printf '%s\n' "$out" | grep -vE '^(Server:|Address:.*[#:]53$|$)')")"
-    if [[ "$CORP_DNS_MODE" == bastion ]]; then
-      warn "      → bastion 에서 './demo.sh corpdns up' 했는지, IP 가 붙어 있는지 확인 (README 5-5b)"
-    else
-      warn "      → 사내 DNS 에 ${PG_DOMAIN} → ${PG_IP} A 레코드 등록, 노드에서 ${dns_ip}:53/udp 로 갈 수 있는지 확인 (README 5-5b)"
-    fi
-    fail=1
-  fi
-done
 out="$(probe pg-probe docker.io/curlimages/curl:8.10.1 \
        sh -c "curl -sSk -m 5 -o /dev/null -w 'HTTP %{http_code}' --resolve '${PG_DOMAIN}:443:${PG_IP}' 'https://${PG_DOMAIN}/health' 2>&1" \
        2>&1 || true)"

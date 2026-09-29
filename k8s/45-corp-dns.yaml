@@ -1,9 +1,11 @@
 # 사내 DNS (CORP_DNS_MODE=cluster) — 주 DNS ns1-corp-dns, 보조 DNS ns2-corp-dns
-#   - 결제 서비스가 PG 도메인을 이 두 서버에 주 → 보조 순서로 직접 질의한다 (클러스터 DNS 를 거치지 않음)
+#   - 결제 서비스(PG 도메인)와 배송 서비스(택배사 도메인)가 이 두 서버에 주 → 보조 순서로 질의한다 (클러스터 DNS 를 거치지 않음)
 #   - 두 서버는 같은 존(corp-dns-zone ConfigMap)을 읽는다 = 주 → 보조 존 복제가 끝난 상태
 #   - 루트(.) 존을 권한 있게 맡으므로 등록되지 않은 이름에는 NXDOMAIN 을 답한다
-#   - demo-infra 는 인바운드 기본 차단(55-network-isolation.yaml)이라, 결제 서비스 → 주·보조 DNS 허용 정책을 서버별로 둔다
-#   - 주 DNS 장애는 파드를 죽이지 않고 주 DNS 허용 정책(allow-corp-dns-primary-from-payment)을 지워서 만든다
+#   - demo-infra 는 인바운드 기본 차단(55-network-isolation.yaml)이라 허용 정책을 둔다
+#       결제 → 주 / 결제 → 보조 (서버별로 따로), 배송 → 주·보조
+#   - 주 DNS 장애는 파드를 죽이지 않고 결제 → 주 DNS 허용 정책(allow-corp-dns-primary-from-payment)을 지워서 만든다
+#     (PG 시나리오는 결제 서비스만 겪도록 — 택배사 시나리오의 배송 서비스는 영향 없음)
 #     → 기본 차단 정책이 질의를 버림 (응답 없음 = 타임아웃). primary-up 은 이 파일을 다시 적용해 정책을 되살린다
 #   - 로그에 질의마다 서버 이름이 찍힌다 → 주 → 보조로 넘어가는 순간을 파드 로그로 확인
 # 존 ConfigMap(corp-dns-zone)은 레코드를 바꿀 수 있도록 매니페스트가 아니라 스크립트(scripts/corpdns.sh)가 만든다.
@@ -60,7 +62,8 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
-            # coredns 바이너리의 파일 capability 때문에 NET_BIND_SERVICE 를 남긴다 (40-courier-dns.yaml 참고)
+            # coredns 바이너리의 파일 capability 때문에 NET_BIND_SERVICE 를 남긴다 — 이것만 빼면 'exec /coredns: operation not permitted'.
+            # NET_BIND_SERVICE 는 restricted-v2 SCC / Pod Security restricted 가 추가를 허용하는 유일한 capability
             capabilities: { drop: ["ALL"], add: ["NET_BIND_SERVICE"] }
           resources:
             requests: { cpu: 10m, memory: 32Mi }
@@ -177,6 +180,26 @@ spec:
             matchLabels: { kubernetes.io/metadata.name: demo-shop }
           podSelector:
             matchLabels: { app: payment-service }
+      ports:
+        - { protocol: UDP, port: 1053 }
+        - { protocol: TCP, port: 1053 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-corp-dns-from-delivery
+  namespace: demo-infra
+  labels: { demo.observ/policy: isolation }
+spec:
+  podSelector:
+    matchLabels: { app: corp-dns }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: demo-shop }
+          podSelector:
+            matchLabels: { app: delivery-service }
       ports:
         - { protocol: UDP, port: 1053 }
         - { protocol: TCP, port: 1053 }

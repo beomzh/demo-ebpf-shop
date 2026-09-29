@@ -58,7 +58,8 @@ eBPF 가 가장 잘 보여줄 수 있는 사건입니다. 화면에 나오는 �
 | 화요일 09:40 | 방화벽 허용 후 실패 연결이 없어진 것 확인 | 데모 4 | `./demo.sh fix` |
 | 다음 주 | 여덟 서비스를 같은 기준으로 보는 공통 대시보드로 표준화 | 데모 4 | |
 
-외부 PG사 도메인은 클러스터 DNS 가 아니라 **사내 DNS(주·보조)** 로 조회합니다. 이것을 이용한 추가 시나리오
+외부 택배사·PG사 도메인은 클러스터 DNS 가 아니라 **사내 DNS(주·보조)** 로 조회합니다. 택배사가 IP 를 바꾼 것은
+사내 DNS 의 택배사 레코드가 새 IP 로 바뀐 것으로 재현합니다 (`incident`). 사내 DNS 를 이용한 추가 시나리오
 (사내 DNS 에 PG 도메인 없음 / 주 DNS 장애)는 [6-2](#6-2-추가-시나리오--외부-pg-도메인-dns-장애) 에 있습니다.
 
 ---
@@ -92,11 +93,15 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  subgraph K["클러스터"]
-    DLV["배송 · Python<br/>(demo-shop)"]
-    PAY["결제 · Node.js<br/>(demo-shop)"]
-    CDNS["courier-dns<br/>택배사 도메인 전용 DNS<br/>(demo-infra)"]
+  subgraph K["클러스터 (demo-shop)"]
+    DLV["배송 · Python"]
+    PAY["결제 · Node.js"]
     FW{{"방화벽<br/>NetworkPolicy"}}
+  end
+
+  subgraph C["사내 DNS (기본: demo-infra 파드)"]
+    D1["주 DNS<br/>ns1-corp-dns-0"]
+    D2["보조 DNS<br/>ns2-corp-dns-0"]
   end
 
   subgraph N["외부 API 호스트 (nginx)"]
@@ -105,33 +110,33 @@ flowchart LR
     PGAPI["PG사 API<br/>PG_IP:443"]
   end
 
-  subgraph C["사내 DNS (기본: demo-infra 파드)"]
-    D1["주 DNS<br/>ns1-corp-dns-0"]
-    D2["보조 DNS<br/>ns2-corp-dns-0"]
-  end
+  DLV -->|"① 택배사 도메인 조회"| D1
+  PAY -->|"① PG 도메인 조회"| D1
+  PAY -.->|"주 DNS 무응답 시"| D2
+  D1 -.->|"존 복제"| D2
 
-  DLV -->|"① 도메인 조회"| CDNS
   DLV -->|"② 연결"| FW
   FW -->|"허용"| COLD
   FW -.->|"차단"| CNEW
-
-  PAY -->|"① 도메인 조회"| D1
-  PAY -.->|"주 DNS 무응답 시"| D2
-  D1 -.->|"존 복제"| D2
   PAY -->|"② 승인 HTTPS"| PGAPI
 
   classDef courier fill:#fff1e0,stroke:#e8590c,color:#000
   classDef pg fill:#e7f0ff,stroke:#1c7ed6,color:#000
-  class DLV,CDNS,FW,COLD,CNEW courier
-  class PAY,D1,D2,PGAPI pg
+  classDef dns fill:#f1f3f5,stroke:#495057,color:#000
+  class DLV,FW,COLD,CNEW courier
+  class PAY,PGAPI pg
+  class D1,D2 dns
 ```
 
-주황 = **시나리오 ① 택배사 IP 변경 (본편)**, 파랑 = **시나리오 ② PG 도메인 DNS 장애 (추가)**. 나머지는 평소 트래픽입니다.
+주황 = **시나리오 ① 택배사 IP 변경 (본편)**, 파랑 = **시나리오 ② PG 도메인 DNS 장애 (추가)**, 회색 = 두 시나리오가 함께 쓰는 **사내 DNS**.
+
+택배사 도메인과 PG 도메인은 모두 **사내 DNS 에 A 레코드**로 있습니다 (클러스터 DNS 를 거치지 않음). 배송 서비스도 결제 서비스처럼
+주 DNS 가 응답하지 않으면 2초 뒤 보조 DNS 로 넘어갑니다 (그림에서는 결제 쪽만 표시).
 
 | 시나리오 | 장애가 나는 서비스 | 도메인 조회 | 외부 목적지 | 장애를 만드는 장치 | 명령 |
 | --- | --- | --- | --- | --- | --- |
-| ① 택배사 IP 변경 | 배송 (Python) | **courier-dns** — 클러스터 안(`demo-infra`), 택배사 도메인 전용 | nginx 의 택배사 API (예전 IP / 새 IP) | 방화벽(NetworkPolicy)에 새 IP 없음 | `incident` → `firewall` → `fix` |
-| ② PG 도메인 DNS 장애 | 결제 (Node.js) | **사내 DNS 주·보조** — 결제 서비스가 직접 질의. 기본은 `demo-infra` 의 파드 `ns1-corp-dns-0`(주)·`ns2-corp-dns-0`(보조) | nginx 의 PG사 API (`PG_IP`) | 사내 DNS 에 새 PG 도메인 미등록 / 주 DNS 무응답 | `pg-missing` → `pg-register` / `pg-primary-down` |
+| ① 택배사 IP 변경 | 배송 (Python) | **사내 DNS 주·보조** — 택배사 도메인 레코드 (`incident` 가 새 IP 로 바꿈) | nginx 의 택배사 API (예전 IP / 새 IP) | 방화벽(NetworkPolicy)에 새 IP 없음 | `incident` → `firewall` → `fix` |
+| ② PG 도메인 DNS 장애 | 결제 (Node.js) | **사내 DNS 주·보조** — PG 도메인 레코드. 기본은 `demo-infra` 의 파드 `ns1-corp-dns-0`(주)·`ns2-corp-dns-0`(보조) | nginx 의 PG사 API (`PG_IP`) | 사내 DNS 에 새 PG 도메인 미등록 / 주 DNS 무응답 | `pg-missing` → `pg-register` / `pg-primary-down` |
 
 ### 사용자 요청별 호출 경로
 
@@ -202,10 +207,9 @@ for d in gateway-service order-service delivery-service; do echo "== $d"; oc -n 
 | --- | --- | --- |
 | 여덟 서비스 + MySQL + Redis | 쇼핑몰 | `demo-shop` 네임스페이스. 모니터링 코드·에이전트 없음 |
 | `loadgen` | 사용자 트래픽 | 게이트웨이로 체크아웃·배송 조회·둘러보기를 1초 간격으로 호출 (`demo-infra`) |
-| `courier-dns` | 택배사 도메인의 DNS | 클러스터 안 CoreDNS, `hosts` 한 줄. `incident` 가 IP 를 바꿈 (`demo-infra`) |
 | `fw-*` NetworkPolicy | 사내 방화벽 | 배송 서비스의 나가는 연결 허용 목록. 택배사 예전 IP 만 허용 |
 | 외부 API 호스트 (`courier-ext/`) | 외부 택배사 API + 외부 PG사 API | 클러스터 **밖** 리눅스 호스트의 nginx 1대(HTTPS). 요청 도메인(TLS SNI)으로 택배사·PG 를 구분해 응답. 택배사는 예전 IP·새 IP, PG 는 `PG_IP`(기본: 택배사 예전 IP) |
-| 사내 DNS 주·보조 | 회사의 DNS 서버 2대 | 결제 서비스가 PG 도메인을 직접 질의. **cluster 모드(기본)**: `demo-infra` 의 CoreDNS 파드 `ns1-corp-dns-0`(주)·`ns2-corp-dns-0`(보조) / bastion 모드: `corpdns-ext/` 의 CoreDNS 컨테이너 2개 / corporate 모드: 실제 사내 DNS (예: BIND master·slave) — [5-5b](#5-5b-사내-dns-준비--pg-시나리오용) |
+| 사내 DNS 주·보조 | 회사의 DNS 서버 2대 | 택배사 도메인(배송 서비스)과 PG 도메인(결제 서비스)을 답함. 택배사 레코드는 IP **1개**, `incident` 가 새 IP 로 바꿈. **cluster 모드(기본)**: `demo-infra` 의 CoreDNS 파드 `ns1-corp-dns-0`(주)·`ns2-corp-dns-0`(보조) / bastion 모드: `corpdns-ext/` 의 CoreDNS 컨테이너 2개 / corporate 모드: 실제 사내 DNS (예: BIND master·slave) — [5-5b](#5-5b-사내-dns-준비--pg-시나리오용) |
 
 **장애가 나는 원리**: DNS 가 새 IP 를 돌려주면 배송 서비스가 새 IP 로 TCP 연결을 시도합니다.
 방화벽(NetworkPolicy)이 SYN 을 조용히 버리므로 연결은 5초 뒤 타임아웃되고, 배송 서비스는 주문 서비스에 503,
@@ -289,7 +293,7 @@ for d in gateway-service order-service delivery-service; do echo "== $d"; oc -n 
 | --- | --- | --- | --- |
 | `cluster` (기본) | `demo-infra` 네임스페이스의 CoreDNS 파드 2개 — 주 `ns1-corp-dns-0`, 보조 `ns2-corp-dns-0` | 레코드를 실제로 지우고, 주 DNS 로 들어오는 질의를 NetworkPolicy 로 버린다. **파드 로그로 주 → 보조 전환이 보인다** | 없음 (`deploy` 가 만들고 주소도 자동) |
 | `bastion` | 이 저장소의 `corpdns-ext/` 로 bastion 에 주·보조 DNS 2대 (CoreDNS 컨테이너) | 레코드를 실제로 지우고, 주 DNS 를 실제로 멈춘다 | bastion 에 IP 2개 추가, 53/udp 비어 있어야 함 |
-| `corporate` | 실제 사내 DNS 서버 2대 | 사내 DNS 는 건드리지 않는다. 등록 안 된 새 PG 도메인으로 교체 / 주 DNS 로 가는 패킷 차단(NetworkPolicy) | 사내 DNS 에 `PG_DOMAIN → PG_IP` A 레코드 등록, 노드 → 사내 DNS 53/udp 허용 |
+| `corporate` | 실제 사내 DNS 서버 2대 | 사내 DNS 는 건드리지 않는다. 등록 안 된 새 PG 도메인으로 교체 / 주 DNS 로 가는 패킷 차단(NetworkPolicy) | 사내 DNS 에 `PG_DOMAIN → PG_IP`, `COURIER_DOMAIN → 예전 IP` A 레코드 등록, 노드 → 사내 DNS 53/udp 허용. `incident`·`reset` 때 택배사 레코드를 담당자가 바꿔야 함 |
 
 > **예전 IP·새 IP 고르기**: 택배사 호스트의 현재 IP 를 예전 IP 로, 같은 서브넷에서 비어 있는 IP 하나를 새 IP 로
 > 정하면 됩니다. 네트워크 담당자에게 사용 가능한 IP 를 확인하세요.
@@ -351,7 +355,7 @@ COURIER_NEW_IP=10.0.0.62     # 택배사 호스트에 새로 붙일 보조 IP
 
 | 변수 | 기본값 | 설명 |
 | --- | --- | --- |
-| `COURIER_DOMAIN` | `api.courier.example` | 가상 택배사 도메인. **공인 DNS 등록 불필요** (클러스터 안 courier-dns 만 응답). 바꾸려면 5-4 전에 바꿀 것 |
+| `COURIER_DOMAIN` | `api.courier.example` | 가상 택배사 도메인. **공인 DNS 등록 불필요** (사내 DNS 에 A 레코드로 둠 — cluster·bastion 모드는 자동 등록). 바꾸려면 5-4 전에 바꿀 것 |
 | `CLI` | `auto` | `oc` 가 있으면 `oc`, 없으면 `kubectl` |
 | `REGISTRY_MODE` | `ocp-internal` | OCP 내부 레지스트리 사용 ([9. 동작 방식](#9-이미지-레지스트리-동작-방식)) |
 | `TAG` | `1.0.0` | 이미지 태그 |
@@ -545,8 +549,9 @@ bastion 에 IP 를 붙이거나 53 포트를 비울 필요가 없습니다. PG �
 | --- | --- |
 | 파드 `ns1-corp-dns-0` / 서비스 `ns1-corp-dns` | **주 DNS** — 결제 서비스가 먼저 묻는 서버 |
 | 파드 `ns2-corp-dns-0` / 서비스 `ns2-corp-dns` | **보조 DNS** — 주 DNS 가 응답하지 않을 때 묻는 서버 |
-| ConfigMap `corp-dns-zone` | 두 서버가 함께 읽는 존 (= 주 → 보조 존 복제가 끝난 상태). 레코드는 `corpdns record-add/remove` 로 바꿈 (약 2초 안에 반영) |
-| NetworkPolicy `allow-corp-dns-primary-from-payment` / `…-secondary-…` | `demo-infra` 는 인바운드 기본 차단이라 결제 서비스 → 주·보조 DNS 를 서버별로 허용. **`pg-primary-down` 은 주 DNS 쪽 허용 정책을 지웁니다** → 주 DNS 로 가는 질의가 버려짐 (파드는 살아 있음) |
+| ConfigMap `corp-dns-zone` | 두 서버가 함께 읽는 존 (= 주 → 보조 존 복제가 끝난 상태). 처음 레코드: PG 도메인 → `PG_IP`, 택배사 도메인 → 예전 IP. `incident`/`reset` 과 `corpdns record-add/remove` 가 바꿈 (약 3초 안에 반영) |
+| NetworkPolicy `allow-corp-dns-primary-from-payment` / `…-secondary-…` | `demo-infra` 는 인바운드 기본 차단이라 결제 서비스 → 주·보조 DNS 를 서버별로 허용. **`pg-primary-down` 은 주 DNS 쪽 허용 정책을 지웁니다** → 결제 서비스의 주 DNS 질의가 버려짐 (파드는 살아 있음) |
+| NetworkPolicy `allow-corp-dns-from-delivery` | 배송 서비스 → 주·보조 DNS 허용 (택배사 도메인 조회). `pg-primary-down` 과 무관 → PG 시나리오 중에도 배송은 영향 없음 |
 
 배포 후 확인:
 
@@ -672,7 +677,8 @@ PG_UNREGISTERED_DOMAIN=api-new.pg.example
 
 | 요청 | 내용 |
 | --- | --- |
-| A 레코드 | `PG_DOMAIN → PG_IP` (예: `api.pg.example → 10.0.0.61`). 주·보조 모두 반영 |
+| A 레코드 | `PG_DOMAIN → PG_IP` (예: `api.pg.example → 10.0.0.61`), `COURIER_DOMAIN → COURIER_OLD_IP` (예: `api.courier.example → 10.0.0.61`). 주·보조 모두 반영 |
+| 촬영 중 변경 | 택배사 레코드를 `incident` 때 새 IP(`COURIER_NEW_IP`)로, `reset` 때 예전 IP 로 — 스크립트가 바뀔 때까지 기다림 |
 | TTL | 짧게 (5~60초) — 레코드 삭제로 시연할 때 빨리 반영되게 |
 | 등록하지 않기 | `PG_UNREGISTERED_DOMAIN` |
 | 질의 허용 | 클러스터 **노드 IP** 대역에서 53/udp·tcp (파드가 밖으로 나갈 때 출발지가 노드 IP 로 바뀜) |
@@ -680,6 +686,7 @@ PG_UNREGISTERED_DOMAIN=api-new.pg.example
 ##### B) BIND 로 주·보조를 직접 구성하는 경우
 
 주 DNS(master)에서 존을 관리하고, 보조 DNS(slave)가 자동으로 복제합니다. 실제 사내 DNS 와 같은 구조라 "주 DNS 장애 → 보조 응답"이 그대로 재현됩니다.
+아래는 PG 존(`pg.example`) 예시이고, **택배사 도메인도 같은 방식으로 `courier.example` 존**(`api  IN A  <COURIER_OLD_IP>`)을 주·보조에 추가합니다.
 
 **주 DNS (`10.0.0.50`)**
 
@@ -772,6 +779,7 @@ dig @10.0.0.100 api-new.pg.example | grep status   # NXDOMAIN
 | 등록 (해결) | `./demo.sh pg-register` — 주·보조 모두에서 조회될 때까지 기다렸다가 회복 확인 | 주 DNS 존 파일에 `api-new  IN A  <PG_IP>` 추가 + 시리얼 증가 → `sudo rndc reload` (`pg-register` 를 먼저 띄워 두면 등록 순간 자동 감지) | 에러 로그가 멈추고 체크아웃 201 |
 | 주 DNS 장애 | `./demo.sh pg-primary-down` — 결제 → 주 DNS 패킷 차단 → **2초 타임아웃 후 보조** | 주 DNS 에서 `sudo systemctl stop named` → **즉시 연결 거부 후 보조** | 결제 서비스 `dns fallback … primary → TIMEOUT`(또는 `CONNREFUSED`) `\| secondary → IP` |
 | 복구 | `./demo.sh pg-reset` | 레코드 복구 + 시리얼 증가 + `rndc reload` / `sudo systemctl start named` | — |
+| 택배사 IP 변경 (본편) | `./demo.sh incident` — 바꿀 레코드를 안내하고 조회될 때까지 기다림 | `courier.example` 존의 `api` 를 새 IP 로 + 시리얼 증가 → `sudo rndc reload` (`reset` 은 예전 IP 로) | 배송 서비스 `connect … timed out` |
 
 - 레코드를 고칠 때마다 SOA **시리얼을 올려야** 보조 DNS 로 복제됩니다 (`2026092801` → `2026092802` …).
 - 서버가 통째로 죽은 것처럼 **결제가 2초씩 느려지는 모습**을 보여주려면 스크립트의 `pg-primary-down` 이 적합합니다. named 만 멈추면 즉시 거부라 지연이 거의 없습니다.
@@ -862,13 +870,14 @@ shop-member-service     1.0.0   image-registry.openshift-image-registry.svc:5000
 1. `demo-shop`, `demo-infra` 네임스페이스 (Pod Security `restricted`)
 2. ImageStream 에 이미지 8개가 있는지 확인 — 없으면 "`./demo.sh push` 를 먼저 실행하세요" 로 중단
 3. 시크릿: `courier-ca`(택배사 CA 공개 인증서), `mysql-auth`·`redis-auth`(**무작위 비밀번호**, 처음 한 번만 생성)
-4. `courier-dns` → 택배사 도메인이 **예전 IP** 를 가리킴
+4. 사내 DNS(cluster 모드: `ns1-corp-dns`·`ns2-corp-dns` 파드) → 택배사 도메인은 **예전 IP**, PG 도메인은 `PG_IP`
+   (예전 버전의 `courier-dns` 가 남아 있으면 지움)
 5. MySQL, Redis, 여덟 서비스 (이미지: `image-registry.openshift-image-registry.svc:5000/demo-shop/shop-*:<TAG>`)
-6. 방화벽: 배송 서비스는 택배사 DNS 와 **예전 IP:443** 만 나갈 수 있음
+6. 방화벽: 배송 서비스는 사내 DNS 와 **예전 IP:443** 만 나갈 수 있음
 7. 서비스 간 인바운드 격리 정책
 8. 모든 파드 Ready 대기 → 부하 발생기 기동
 
-`배포 완료` 가 나오면 끝입니다. 파드 상태: `oc get pods -n demo-shop` (10개 Running: 서비스 8 + MySQL + Redis), `oc get pods -n demo-infra` (2개 Running)
+`배포 완료` 가 나오면 끝입니다. 파드 상태: `oc get pods -n demo-shop` (10개 Running: 서비스 8 + MySQL + Redis), `oc get pods -n demo-infra` (cluster 모드 3개 Running: loadgen + `ns1-corp-dns-0` + `ns2-corp-dns-0`)
 
 ### 5-10. 확인 **[작업 PC]**
 
@@ -880,15 +889,16 @@ shop-member-service     1.0.0   image-registry.openshift-image-registry.svc:5000
 `status` 정상 출력:
 
 ```
-[..] 택배사 DNS 설정 (courier-hosts)
-10.0.0.61 api.courier.example
+[..] 사내 DNS 의 택배사 레코드 (서버별 조회)
+  primary   ns1-corp-dns(172.30.0.10)  api.courier.example → 10.0.0.61 (1ms)
+  secondary ns2-corp-dns(172.30.0.11)  api.courier.example → 10.0.0.61 (1ms)
 [..] 배송 서비스 파드에서 본 DNS 응답과 443 연결 (3초 제한)
   DNS  api.courier.example -> 10.0.0.61
   TCP  10.0.0.61:443 연결 성공
 [..] 방화벽 규칙
 RULE                          DESCRIPTION
 fw-allow-courier-10-0-0-61    택배사 API (api.courier.example) 10.0.0.61:443 허용
-fw-delivery-default           배송 서비스 egress 기본 규칙: DNS 만 허용, 그 외 차단
+fw-delivery-default           배송 서비스 egress 기본 규칙: 사내 DNS 만 허용, 그 외 차단
 [..] 게이트웨이 → 주문 → 배송을 거친 배송 조회 1건
   HTTP 200  0.02s
 ```
@@ -906,14 +916,14 @@ fw-delivery-default           배송 서비스 egress 기본 규칙: DNS 만 허
 ## 6. 촬영 진행
 
 ```bash
-./demo.sh incident   # 촬영 15~30분 전: 택배사가 IP 변경 (DNS → 새 IP). 방화벽은 그대로
+./demo.sh incident   # 촬영 15~30분 전: 택배사가 IP 변경 (사내 DNS 의 택배사 레코드 → 새 IP). 방화벽은 그대로
 ./demo.sh status     # DNS -> 새 IP, TCP 연결 실패, HTTP 502 약 5초
 #  ── 영상 ① 발견, ② 원인 촬영 ──
 ./demo.sh firewall   # 데모 3: 방화벽에 새 IP 가 없음을 보여줌
 ./demo.sh fix        # 데모 4: 방화벽에 새 IP:443 허용 (1~2분 뒤 화면에 반영)
 ./demo.sh status     # TCP 연결 성공, HTTP 200
 #  ── 영상 ③ 해결과 표준화 촬영 ──
-./demo.sh reset      # 다음 테이크 준비 (새 IP 규칙 삭제, DNS → 예전 IP)
+./demo.sh reset      # 다음 테이크 준비 (새 IP 규칙 삭제, 사내 DNS 택배사 레코드 → 예전 IP)
 ```
 
 | 명령 | DNS 응답 | 방화벽 허용 | 배송 조회 결과 |
@@ -1193,7 +1203,7 @@ oc login ...               # 세션이 만료됐다면
 | `deploy` | 전체 배포 (정상 상태) | `scripts/deploy.sh` |
 | `security` | 파드별 SCC·보안 설정·네트워크 정책 점검 | `scripts/security-check.sh` |
 | `status` | DNS·연결·방화벽·배송 조회 1건 요약 | `scripts/scenario.sh status` |
-| `incident` | DNS 를 새 IP 로 (사건 발생) | `scripts/scenario.sh incident` |
+| `incident` | 사내 DNS 의 택배사 레코드를 새 IP 로 (사건 발생) | `scripts/scenario.sh incident` |
 | `firewall` | 방화벽 규칙 목록 | `scripts/scenario.sh firewall` |
 | `fix` | 방화벽에 새 IP 허용 | `scripts/scenario.sh fix` |
 | `reset` / `baseline` | 새 IP 규칙 삭제, DNS 를 예전 IP 로 | `scripts/scenario.sh reset` |
@@ -1246,7 +1256,7 @@ OCP 내부 레지스트리는 **push 하는 주소와 pull 하는 주소가 다�
 | --- | --- | --- |
 | OpenTelemetry 에이전트·SDK 를 설치하지 않는다. 트랜잭션 조회 소스 토글은 eBPF | eBPF 수집만 보여주기 위해 | 모든 `services/*` 에 모니터링 의존성 없음. `check` 가 흔적 점검 |
 | ClickHouse 와 노드 에이전트의 traces endpoint 설정 | 없으면 T-Map·트랜잭션 조회가 비어 있음 | Observ 설치 측 설정 (이 저장소 밖) |
-| 택배사 도메인은 IP **1개**만 돌려준다 | 여러 개면 실패 목적지가 `도메인:443` 으로 합쳐져 새 IP 가 안 보임 | `k8s/40-courier-dns.yaml` — `hosts` 한 줄, `scenario.sh` 가 항상 한 줄로 교체 |
+| 택배사 도메인은 IP **1개**만 돌려준다 | 여러 개면 실패 목적지가 `도메인:443` 으로 합쳐져 새 IP 가 안 보임 | 사내 DNS 존에 A 레코드 한 줄 (`corp-dns-zone`), `scenario.sh` 가 항상 한 줄로 교체 |
 | 배송 서비스는 택배사 호출에 **5초 타임아웃**, 실패하면 **5xx** | 커널 기본 재시도에 맡기면 약 127초 뒤에야 실패 1건 기록 | `delivery-service/app.py` — `COURIER_TIMEOUT_SECONDS=5`, 실패 시 503 |
 | 배송 서비스는 **주문 서비스가 호출**한다 | 브라우저가 직접 호출하면 오류·지연이 집계되지 않음 | loadgen → 게이트웨이 → 주문 → 배송. 타임아웃은 바깥쪽일수록 길게 (배송→택배사 5초 < 주문→배송 10초 < 게이트웨이→주문 15초 < loadgen 20초) |
 | 외부 HTTPS 호출은 **Python(시스템 libssl)** 이 맡는다 (다른 서비스는 외부 호출 없음) | Java(JSSE)·Node.js(OpenSSL 정적 링크)의 HTTPS 내용은 eBPF 로 볼 수 없음 | `python:3.12-slim` — `_ssl` 이 `libssl.so.3` 동적 링크 |
@@ -1259,7 +1269,7 @@ OCP 내부 레지스트리는 **push 하는 주소와 pull 하는 주소가 다�
 - **매 요청 DNS 조회**: TTL 5초 + Python 은 DNS 를 캐시하지 않음 → DNS 탭에 택배사 도메인 조회가 꾸준히 보입니다.
 - **평문 서비스 간 통신**: 서비스 간 HTTP/1.1 평문, MySQL `useSSL=false` → SLO Client 표·MySQL 탭에 프로토콜이 구분되어 나옵니다.
 - **프로브 잡음 제거**: readinessProbe 는 `tcpSocket` → kubelet 의 HTTP 헬스체크가 지표에 섞이지 않습니다.
-- **데모 장치 분리**: 부하 발생기·택배사 DNS 는 `demo-infra` → `demo-shop` 으로 필터하면 여덟 서비스(+MySQL·Redis)만 보입니다.
+- **데모 장치 분리**: 부하 발생기·사내 DNS 는 `demo-infra` → `demo-shop` 으로 필터하면 여덟 서비스(+MySQL·Redis)만 보입니다.
 - **평문 Redis**: 재고 서비스는 외부 라이브러리 없이 RESP 로 Redis 와 평문 통신 → Redis 명령이 보입니다.
 - **확실한 드롭**: 차단은 거부(RST)가 아니라 SYN drop → "연결 실패(타임아웃)"로 기록되고 배송 서비스 요청은 약 5초에 끝납니다.
 
@@ -1286,7 +1296,7 @@ OCP 내부 레지스트리는 **push 하는 주소와 pull 하는 주소가 다�
 | Pod Security Admission | `demo-shop`, `demo-infra` 에 `restricted` enforce·audit·warn 라벨 |
 | 실행 사용자 | 이미지 USER 는 숫자(비 root). 매니페스트에 `runAsUser` 를 **지정하지 않아** OCP 가 임의 UID(그룹 0) 부여 |
 | 컨테이너 설정 | `runAsNonRoot`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, `seccompProfile: RuntimeDefault` |
-| capability 예외 | `courier-dns` 만 `NET_BIND_SERVICE` 추가 — coredns 1.11+ 바이너리에 파일 capability 가 붙어 있어 없으면 `exec /coredns: operation not permitted`. restricted-v2 가 허용하는 유일한 추가 capability |
+| capability 예외 | 사내 DNS(`ns1/ns2-corp-dns`, CoreDNS) 만 `NET_BIND_SERVICE` 추가 — coredns 1.11+ 바이너리에 파일 capability 가 붙어 있어 없으면 `exec /coredns: operation not permitted`. restricted-v2 가 허용하는 유일한 추가 capability |
 | 파일시스템 | `readOnlyRootFilesystem: true` (MySQL·Redis 제외 — 기동 시 설정 파일 생성). 런타임 임시파일용 `/tmp` 만 emptyDir |
 | ServiceAccount | `automountServiceAccountToken: false` |
 | MySQL 이미지 | 공식 `mysql:8.0` 은 restricted-v2 에서 기동 불가 → OCP 용 `quay.io/sclorg/mysql-80-c9s` (Red Hat 구독이 있으면 `registry.redhat.io/rhel9/mysql-80` 으로 교체 가능, 환경변수 동일) |
@@ -1306,7 +1316,7 @@ OCP 내부 레지스트리는 **push 하는 주소와 pull 하는 주소가 다�
 
 | 정책 | 방향 | 허용 내용 |
 | --- | --- | --- |
-| `fw-delivery-default` | egress | 배송 → `courier-dns` (1053/UDP·TCP) **만** |
+| `fw-delivery-default` | egress | 배송 → 사내 DNS **만** (cluster 모드: `ns1/ns2-corp-dns` 파드 1053/UDP·TCP, 그 외: 사내 DNS IP 53) |
 | `fw-allow-courier-<예전IP>` | egress | 배송 → 택배사 예전 IP 443 |
 | `default-deny-ingress` | ingress | `demo-shop`, `demo-infra` 기본 차단 |
 | `allow-gateway-from-loadgen` | ingress | loadgen → 게이트웨이 8080 |
@@ -1317,7 +1327,8 @@ OCP 내부 레지스트리는 **push 하는 주소와 pull 하는 주소가 다�
 | `allow-order-backends-from-order` | ingress | 주문 → 결제·알림·배송 8080 |
 | `allow-mysql-from-member` | ingress | 회원 → MySQL 3306 |
 | `allow-redis-from-inventory` | ingress | 재고 → Redis 6379 |
-| `allow-courier-dns-from-delivery` | ingress | 배송 → courier-dns 1053 |
+| `allow-corp-dns-from-delivery` | ingress | 배송 → 사내 DNS 주·보조 1053 (cluster 모드) |
+| `allow-corp-dns-primary-from-payment` / `…-secondary-…` | ingress | 결제 → 사내 주 / 보조 DNS 1053 (cluster 모드). `pg-primary-down` 은 주 DNS 쪽만 지움 |
 
 - 인바운드 격리(`demo.observ/policy=isolation`)는 방화벽 장면 규칙(`demo.observ/firewall=egress`)과 라벨이 달라 `firewall` 화면에 나오지 않습니다.
 - eBPF 노드 에이전트는 커널에서 관찰하므로 네트워크 정책과 무관하게 수집합니다.
@@ -1364,7 +1375,7 @@ oc adm policy add-scc-to-user privileged -z <agent-serviceaccount> -n <agent-nam
 | 파드 `ImagePullBackOff` (shop-* 이미지) | `oc -n demo-shop get istag`, `oc -n demo-shop describe pod <pod>`. push 한 네임스페이스가 `demo-shop` 인지 |
 | 파드 `ImagePullBackOff` (curl·coredns·mysql) | 노드가 docker.io·registry.k8s.io·quay.io 에 접근 불가 → 아래 "폐쇄망" |
 | 파드 `CreateContainerConfigError` / SCC 거부 | `oc get pod <pod> -o yaml \| grep scc`, `oc get events -n demo-shop`. `./demo.sh security` |
-| courier-dns 파드 `exec /coredns: operation not permitted` | `NET_BIND_SERVICE` capability 누락. `k8s/40-courier-dns.yaml` 에 `add: ["NET_BIND_SERVICE"]` 가 있는지 확인 후 `./demo.sh deploy` |
+| 사내 DNS 파드(`ns1/ns2-corp-dns-0`) `exec /coredns: operation not permitted` | `NET_BIND_SERVICE` capability 누락. `k8s/45-corp-dns.yaml` 에 `add: ["NET_BIND_SERVICE"]` 가 있는지 확인 후 `./demo.sh deploy` |
 | 배송 서비스 `CrashLoopBackOff`, 로그 `CA file … not found` | `courier-ca` 시크릿 없음 → `./demo.sh certs` 후 `./demo.sh deploy` |
 | `check` 4) 택배사 응답 없음 | 택배사 호스트 nginx(`sudo ./run.sh status`), 443 방화벽, 노드 → 택배사 IP 라우팅 확인 |
 | 택배사 nginx `Permission denied` (인증서) | SELinux. `run.sh` 로 띄울 것 (`:Z` 라벨) |
@@ -1387,7 +1398,7 @@ oc adm policy add-scc-to-user privileged -z <agent-serviceaccount> -n <agent-nam
 | `incident` 후에도 배송 조회가 200 | 새 IP 가 이미 허용됨 (`./demo.sh firewall` 에 새 IP 규칙이 있으면 `./demo.sh reset` 후 다시) |
 | 장애 시 5초가 아니라 즉시 실패 | 경로 어딘가에서 RST/ICMP 거부 중. 택배사 호스트 방화벽이 새 IP 를 거부하고 있지 않은지 확인 |
 | 정상 상태에서도 연결 실패 | 택배사 호스트 nginx, 예전 IP 라우팅 확인 (`check` 4번) |
-| 실패 목적지가 IP 가 아니라 `도메인:443` 으로 보임 | DNS 가 IP 를 여러 개 돌려주는지: `oc -n demo-infra get cm courier-hosts -o yaml` |
+| 실패 목적지가 IP 가 아니라 `도메인:443` 으로 보임 | 사내 DNS 가 택배사 도메인에 IP 를 여러 개 돌려주는지: `./demo.sh corpdns records` |
 | DNS 탭에 NXDOMAIN 이 보임 | 배송 서비스 파드 `/etc/resolv.conf` 에 search 가 없고 `ndots:1` 인지 확인 |
 | T-Map·트랜잭션 조회가 비어 있음 | ClickHouse, 노드 에이전트 traces endpoint 설정 |
 | 언어가 Go 로 안 나옴 | `product-service` 를 `-s -w` 없이 Go 1.17+ 로 빌드했는지 |
@@ -1403,7 +1414,7 @@ oc -n demo-infra import-image coredns:v1.11.3 --from=registry.k8s.io/coredns/cor
 oc -n demo-shop       import-image mysql-80:c9s   --from=quay.io/sclorg/mysql-80-c9s:c9s --confirm
 oc -n demo-shop       import-image redis-7:c9s    --from=quay.io/sclorg/redis-7-c9s:c9s --confirm
 # k8s/60-loadgen.yaml    image: image-registry.openshift-image-registry.svc:5000/demo-infra/curl:8.10.1
-# k8s/40-courier-dns.yaml image: image-registry.openshift-image-registry.svc:5000/demo-infra/coredns:v1.11.3
+# k8s/45-corp-dns.yaml  image: image-registry.openshift-image-registry.svc:5000/demo-infra/coredns:v1.11.3
 # k8s/10-mysql.yaml      image: image-registry.openshift-image-registry.svc:5000/demo-shop/mysql-80:c9s
 # k8s/15-redis.yaml      image: image-registry.openshift-image-registry.svc:5000/demo-shop/redis-7:c9s
 ```
@@ -1415,7 +1426,7 @@ oc -n demo-shop       import-image redis-7:c9s    --from=quay.io/sclorg/redis-7-
 ```bash
 oc -n demo-shop logs deploy/delivery-service -f     # 실패 단계·목적지 IP·소요시간
 oc -n demo-shop logs deploy/order-service -f
-oc -n demo-infra logs deploy/courier-dns -f     # DNS 질의 로그
+./demo.sh corpdns logs                          # 사내 DNS 주·보조 질의 로그 (택배사·PG 도메인)
 ./demo.sh traffic                               # 부하 발생기
 ```
 
@@ -1465,8 +1476,8 @@ sudo ./courier-ext/setup-ips.sh del <NIC> <CORP_DNS_SECONDARY>/<prefix>
 │   ├── 10-mysql.yaml
 │   ├── 15-redis.yaml
 │   ├── 20-services.yaml      게이트웨이·회원·상품·재고·주문·결제·알림
-│   ├── 30-delivery.yaml      배송 (택배사 전용 DNS 사용)
-│   ├── 40-courier-dns.yaml
+│   ├── 30-delivery.yaml      배송 (사내 DNS 로 택배사 도메인 조회)
+│   ├── 45-corp-dns.yaml      사내 DNS 주·보조 (cluster 모드: ns1/ns2-corp-dns)
 │   ├── 50-firewall.yaml      방화벽 (데모 장면용 egress)
 │   ├── 55-network-isolation.yaml  서비스 간 ingress 격리
 │   └── 60-loadgen.yaml
@@ -1516,7 +1527,7 @@ REGISTRY_TLS_VERIFY=true
 `CLI=kubectl`, `REGISTRY_MODE=external` 로 두면 됩니다 (`oc` 가 없으면 `CLI=auto` 도 kubectl 을 고릅니다).
 NetworkPolicy 를 집행하는 CNI(Calico, Canal, Cilium, OVN-Kubernetes 등)가 필요합니다.
 
-- OpenShift 가 아니면(SCC API 없음) 스크립트가 자동으로: loadgen·courier-dns(이미지 USER 가 이름)와 `check` 의 점검 파드에
+- OpenShift 가 아니면(SCC API 없음) 스크립트가 자동으로: loadgen·사내 DNS(이미지 USER 가 이름)와 `check` 의 점검 파드에
   `runAsUser: 65532` 를 넣습니다. 나머지 이미지는 USER 가 숫자라 그대로 됩니다.
 - Pod Security `restricted` 가 클러스터 전체에 강제돼 있어도 모든 파드가 뜹니다 (k3s + restricted 로 확인).
 빌드는 `CONTAINER_ENGINE=docker` 로 `docker buildx` 를 쓸 수 있습니다.
