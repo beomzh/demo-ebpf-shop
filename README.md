@@ -160,6 +160,23 @@ loadgen 은 사용자 역할이라 게이트웨이만 호출합니다. 게이트
 - 체크아웃 한 번에 서비스 간 HTTP 호출 8번 + 외부 PG 호출 1번 + DB 쿼리가 일어나, 연결선과 호출 수가 풍부하게 쌓입니다.
 - 프로토콜도 여러 가지입니다: HTTP(서비스 간), MySQL, Redis(RESP), DNS(클러스터 DNS·사내 DNS), HTTPS(배송 → 택배사, 결제 → PG사).
 
+### 정상 처리 로그 (INFO)
+
+여덟 서비스 모두 요청을 정상 처리하면 INFO 한 줄을 남깁니다 (요청 ID `req=` 가 같아 한 요청을 서비스별로 따라갈 수 있음). 체크아웃 1건 예:
+
+```
+INFO: gateway-service   checkout ok req=lg-… status=201 elapsedMs=111 memberId=10 productId=3 qty=2 price=4000
+INFO  product-service   product ok req=lg-… id=3 price=4000 stock=1000 elapsedMs=1
+INFO  inventory-service stock ok req=lg-… product=3 stock=1000 elapsedMs=1
+INFO  order-service     order created req=lg-… orderId=1001 memberId=10 productId=3 qty=2 amount=8000 memberMs=33 stockMs=3 paymentMs=37 notificationMs=11
+INFO  member-service    member ok req=lg-… id=10 grade=VIP elapsedMs=2
+INFO  inventory-service reserve ok req=lg-… product=3 qty=2 remaining=998 elapsedMs=1
+INFO  payment-service   payment approved req=lg-… orderId=1001 paymentId=… amount=8000 charged=7200 grade=VIP pg=api.pg.example memberMs=12 pgMs=22
+INFO  notification-service notified req=lg-… order=1001 member=member-10 channel=sms elapsedMs=6
+```
+
+배송 조회는 `gateway-service tracking ok` → `order-service tracking ok` → `delivery-service tracking ok` 순서로 남습니다.
+
 ### 애플리케이션 로그로 실패 지점 찾기
 
 모든 서비스는 다른 곳을 호출하다 실패하면 **같은 형식의 로그 한 줄**을 남기고, 에러 응답에 **실패 경로(`errorPath`)** 를 담아

@@ -96,10 +96,14 @@ server.mount_proc('/health') { |_req, res| json(res, 200, status: 'UP') }
 
 server.mount_proc('/inventory') do |req, res|
   req_id = req['X-Request-Id'] || '-'
+  started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  elapsed_ms = -> { ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000).round }
   begin
     if req.request_method == 'GET' && (m = %r{\A/inventory/(\d+)\z}.match(req.path))
       id = m[1]
-      json(res, 200, productId: Integer(id), stock: current_stock(id))
+      stock = current_stock(id)
+      LOG.info("stock ok req=#{req_id} product=#{id} stock=#{stock} elapsedMs=#{elapsed_ms.call}")
+      json(res, 200, productId: Integer(id), stock: stock)
     elsif req.request_method == 'POST' && (m = %r{\A/inventory/(\d+)/reserve\z}.match(req.path))
       id = m[1]
       qty = [Integer(JSON.parse(req.body || '{}').fetch('qty', 1)), 1].max
@@ -109,6 +113,7 @@ server.mount_proc('/inventory') do |req, res|
         remaining = MiniRedis.call('INCRBY', stock_key(id), INITIAL_STOCK)
         LOG.info("restocked req=#{req_id} product=#{id} remaining=#{remaining}")
       end
+      LOG.info("reserve ok req=#{req_id} product=#{id} qty=#{qty} remaining=#{remaining} elapsedMs=#{elapsed_ms.call}")
       json(res, 200, productId: Integer(id), reserved: qty, remaining: remaining)
     else
       json(res, 404, error: 'not found')

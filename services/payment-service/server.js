@@ -142,8 +142,10 @@ const server = http.createServer(async (req, res) => {
       return send(res, pg.status === 0 ? 504 : 502, { error: 'pg call failed', errorPath: path });
     }
 
+    const paymentId = crypto.randomUUID();
+    log('INFO', `payment approved req=${reqId} orderId=${body.orderId} paymentId=${paymentId} amount=${body.amount} charged=${charged} grade=${grade} pg=${PG_DOMAIN} memberMs=${member.ms} pgMs=${pg.ms}`);
     send(res, 201, {
-      paymentId: crypto.randomUUID(),
+      paymentId,
       orderId: body.orderId,
       amount: body.amount,
       charged,

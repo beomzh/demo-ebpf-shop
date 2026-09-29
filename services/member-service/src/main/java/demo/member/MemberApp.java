@@ -48,6 +48,7 @@ public class MemberApp {
     }
 
     private static void getMember(HttpExchange ex) throws IOException {
+        long started = System.nanoTime();
         String reqId = ex.getRequestHeaders().getFirst("X-Request-Id");
         long id;
         try {
@@ -76,9 +77,13 @@ public class MemberApp {
                 return;
             }
         }
+        long elapsedMs = (System.nanoTime() - started) / 1_000_000;
         if (json == null) {
+            log.info("member not found req=" + reqId + " id=" + id + " elapsedMs=" + elapsedMs);
             send(ex, 404, "{\"error\":\"not found\"}");
         } else {
+            log.info("member ok req=" + reqId + " id=" + id + " grade=" + json.replaceFirst(".*\"grade\":\"([^\"]*)\".*", "$1")
+                    + " elapsedMs=" + elapsedMs);
             send(ex, 200, json);
         }
     }

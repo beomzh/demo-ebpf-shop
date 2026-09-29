@@ -83,7 +83,8 @@ if ($method === 'POST' && $path === '/notifications') {
 
     $member = json_decode($resp, true) ?: [];
     $channel = ($member['grade'] ?? '') === 'VIP' ? 'sms' : 'email';
-    logmsg('INFO', sprintf('notified req=%s order=%d member=%s channel=%s', $reqId, $orderId, $member['name'] ?? $memberId, $channel));
+    logmsg('INFO', sprintf('notified req=%s order=%d member=%s channel=%s elapsedMs=%d', $reqId, $orderId, $member['name'] ?? $memberId, $channel,
+        (int)((microtime(true) - $started) * 1000)));
     respond(202, ['notificationId' => bin2hex(random_bytes(8)), 'orderId' => $orderId, 'channel' => $channel]);
 }
 

@@ -26,7 +26,7 @@ var productUrl = Env("PRODUCT_URL", "http://product-service:8080");
 var memberUrl = Env("MEMBER_URL", "http://member-service:8080");
 var orderUrl = Env("ORDER_URL", "http://order-service:8080");
 var defaultTimeout = TimeSpan.FromSeconds(5);
-// 체크아웃: 주문 안에서 외부 PG 를 두 번(카드 혜택·승인) 부르고, 주 DNS 장애 시 각각 2초씩 더 걸릴 수 있다
+// 체크아웃: 주문 안에서 회원·재고·결제(→ 외부 PG 승인)·알림을 차례로 부른다
 var checkoutTimeout = TimeSpan.FromSeconds(double.Parse(Env("CHECKOUT_TIMEOUT_SECONDS", "10")));
 // 배송 조회는 주문 서비스의 배송 호출 타임아웃(10초)보다 길게 둬서, 하위 서비스가 돌려준 5xx 가 그대로 전달되게 한다.
 var trackingTimeout = TimeSpan.FromSeconds(double.Parse(Env("TRACKING_TIMEOUT_SECONDS", "15")));
@@ -101,20 +101,27 @@ IResult Fail(string reqId, Upstream u, string detail = "")
 
 IResult Json(int status, string body) => Results.Content(body, "application/json", Encoding.UTF8, status);
 
+// 정상 처리 로그 한 줄 (요청 ID·결과·걸린 시간)
+IResult Ok(string reqId, string what, Upstream u, string detail = "")
+{
+    log.LogInformation("{What} ok req={ReqId} status={Status} elapsedMs={Ms} {Detail}", what, reqId, u.Status, u.Ms, detail);
+    return Json(u.Status, u.Body);
+}
+
 app.MapGet("/health", () => Results.Json(new { status = "UP" }));
 
 app.MapGet("/api/products/{id:int}", async (int id, HttpContext ctx) =>
 {
     var reqId = RequestId(ctx);
     var r = await Call("product-service", HttpMethod.Get, $"{productUrl}/products/{id}", reqId, defaultTimeout);
-    return r.Status == 200 ? Json(200, r.Body) : Fail(reqId, r);
+    return r.Status == 200 ? Ok(reqId, "product", r, $"productId={id}") : Fail(reqId, r);
 });
 
 app.MapGet("/api/members/{id:int}", async (int id, HttpContext ctx) =>
 {
     var reqId = RequestId(ctx);
     var r = await Call("member-service", HttpMethod.Get, $"{memberUrl}/members/{id}", reqId, defaultTimeout);
-    return r.Status == 200 ? Json(200, r.Body) : Fail(reqId, r);
+    return r.Status == 200 ? Ok(reqId, "member", r, $"memberId={id}") : Fail(reqId, r);
 });
 
 app.MapPost("/api/checkout", async (HttpContext ctx) =>
@@ -143,14 +150,16 @@ app.MapPost("/api/checkout", async (HttpContext ctx) =>
     // 2) 주문 생성 (주문 → 회원·재고·결제·알림)
     var payload = JsonSerializer.Serialize(new { memberId, productId, qty, price });
     var order = await Call("order-service", HttpMethod.Post, $"{orderUrl}/orders", reqId, checkoutTimeout, payload);
-    return order.Status == 201 ? Json(201, order.Body) : Fail(reqId, order, $"step=order memberId={memberId} productId={productId}");
+    return order.Status == 201
+        ? Ok(reqId, "checkout", order, $"memberId={memberId} productId={productId} qty={qty} price={price}")
+        : Fail(reqId, order, $"step=order memberId={memberId} productId={productId}");
 });
 
 app.MapGet("/api/orders/{id:long}/tracking", async (long id, HttpContext ctx) =>
 {
     var reqId = RequestId(ctx);
     var r = await Call("order-service", HttpMethod.Get, $"{orderUrl}/orders/{id}/delivery", reqId, trackingTimeout);
-    return r.Status == 200 ? Json(200, r.Body) : Fail(reqId, r, $"step=tracking orderId={id}");
+    return r.Status == 200 ? Ok(reqId, "tracking", r, $"orderId={id}") : Fail(reqId, r, $"step=tracking orderId={id}");
 });
 
 log.LogInformation("gateway listening product={Product} member={Member} order={Order} trackingTimeout={Timeout}s",

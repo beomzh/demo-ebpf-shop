@@ -125,6 +125,10 @@ public class OrderApp {
                 "{\"orderId\":" + orderId + ",\"memberId\":" + memberId + "}");
         if (!noti.is(202)) logFailure(reqId, noti, "orderId=" + orderId + " (주문은 계속 진행)");
 
+        log.info("order created req=" + reqId + " orderId=" + orderId + " memberId=" + memberId + " productId=" + productId
+                + " qty=" + qty + " amount=" + amount + " memberMs=" + member.ms() + " stockMs=" + stock.ms()
+                + " paymentMs=" + payment.ms() + " notificationMs=" + noti.ms());
+
         send(ex, 201, "{\"orderId\":" + orderId + ",\"memberId\":" + memberId + ",\"productId\":" + productId
                 + ",\"qty\":" + qty + ",\"amount\":" + amount + "}");
     }
@@ -133,6 +137,7 @@ public class OrderApp {
         Upstream delivery = call("delivery-service", "GET", DELIVERY_URL + "/deliveries/" + orderId + "/tracking", reqId,
                 DELIVERY_TIMEOUT, null);
         if (delivery.is(200)) {
+            log.info("tracking ok req=" + reqId + " orderId=" + orderId + " deliveryMs=" + delivery.ms());
             send(ex, 200, delivery.body());
             return;
         }

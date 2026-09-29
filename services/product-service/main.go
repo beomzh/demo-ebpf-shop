@@ -107,7 +107,14 @@ func fetchStock(id int, reqID string) (*int, error) {
 	return &body.Stock, nil
 }
 
+// logf : 다른 서비스와 같은 형식 "<시각> <레벨> product-service <메시지>" 로 표준출력에 남긴다
+func logf(level, format string, args ...any) {
+	log.Printf("%s %s product-service %s", time.Now().UTC().Format("2006-01-02T15:04:05"), level, fmt.Sprintf(format, args...))
+}
+
 func main() {
+	log.SetFlags(0)
+	log.SetOutput(os.Stdout)
 	port := envOr("PORT", "8080")
 
 	mux := http.NewServeMux()
@@ -132,21 +139,22 @@ func main() {
 		}
 		p, ok := products[id]
 		if !ok {
-			log.Printf("product not found req=%s id=%d", reqID, id)
+			logf("INFO", "product not found req=%s id=%d", reqID, id)
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 			return
 		}
 		started := time.Now()
 		if stock, err := fetchStock(id, reqID); err != nil {
 			// 재고는 부가 정보라 상품은 그대로 돌려주되, 어디를 호출하다 실패했는지 남긴다
-			log.Printf(`WARN upstream call failed req=%s target=inventory-service call="GET %s/inventory/%d" elapsedMs=%d path="%s" (재고 없이 응답)`,
+			logf("WARN", `upstream call failed req=%s target=inventory-service call="GET %s/inventory/%d" elapsedMs=%d path="%s" (재고 없이 응답)`,
 				reqID, inventoryURL, id, time.Since(started).Milliseconds(), errorPath("inventory-service", err))
 		} else {
 			p.Stock = stock
+			logf("INFO", "product ok req=%s id=%d price=%d stock=%d elapsedMs=%d", reqID, id, p.Price, *stock, time.Since(started).Milliseconds())
 		}
 		writeJSON(w, http.StatusOK, p)
 	})
 
-	log.Printf("product-service listening on :%s inventory=%s", port, inventoryURL)
+	logf("INFO", "listening on :%s inventory=%s", port, inventoryURL)
 	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
