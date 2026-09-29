@@ -5,6 +5,10 @@
 #   incident   사건 발생        사내 DNS 의 택배사 레코드 → 새 IP,   방화벽: 예전 IP 만 허용   (월요일 밤: 택배사가 IP 변경)
 #   fix        해결             방화벽에 새 IP 허용 규칙 추가                (화요일 09:40)
 #   reset      baseline 과 같음 (다음 촬영 준비)
+#
+# 변형 — 택배사 도메인을 못 찾음 (방화벽 타임아웃 대신 DNS NXDOMAIN)
+#   courier-missing   사내 DNS 에서 택배사 도메인 레코드가 빠짐 → 배송 서비스 'dns lookup failed … result=NXDOMAIN', 배송 조회 즉시 502
+#   courier-register  해결: 레코드를 예전 IP 로 다시 등록 → 재시작 없이 회복 (reset 도 같은 일을 함)
 #   status     현재 DNS 응답·방화벽 규칙·연결 가능 여부·배송 조회 결과 요약
 #   firewall   방화벽 규칙 목록만 출력 (데모 3-4 "방화벽 규칙 확인" 장면용)
 #   traffic    부하 발생기 로그 실시간 보기
@@ -39,13 +43,30 @@ set_courier_ip() {
   done
 }
 
-# 사내 DNS 가 택배사 도메인을 ip 로 답하면 0 (응답하는 서버 기준)
+courier_missing() {
+  local waited=0
+  info "사내 DNS: ${COURIER_DOMAIN} 레코드 삭제"
+  if managed_dns; then
+    corpdns record-remove "$COURIER_DOMAIN" >/dev/null
+    return
+  fi
+  courier_resolves_to NXDOMAIN && return
+  info "사내 DNS 담당자에게 요청할 내용 (주 ${CORP_DNS_PRIMARY}, 보조 ${CORP_DNS_SECONDARY} 모두):"
+  echo "    A 레코드  ${COURIER_DOMAIN}  삭제"
+  until courier_resolves_to NXDOMAIN; do
+    (( waited >= 600 )) && die "600초 안에 사내 DNS 에서 ${COURIER_DOMAIN} 가 NXDOMAIN 이 되지 않았습니다"
+    sleep 5; waited=$((waited + 5))
+  done
+}
+
+# 사내 DNS 가 택배사 도메인을 ip 로 답하면 0 (응답하는 서버 기준). ip 자리에 NXDOMAIN 을 주면 '레코드 없음' 확인
 courier_resolves_to() {
   local out; out="$(pg_dns_query "$COURIER_DOMAIN" 2>/dev/null)" || return 1
   [[ -n "$out" ]] && printf '%s\n' "$out" | awk -v ip="$1" '
     $3 ~ /^(TIMEOUT|CONNREFUSED)/ { next }
     { answered = 1 }
-    $3 != ip { bad = 1 }
+    ip == "NXDOMAIN" && $3 !~ /^NXDOMAIN/ { bad = 1 }
+    ip != "NXDOMAIN" && $3 != ip { bad = 1 }
     END { exit (bad || !answered) }'
 }
 
@@ -91,7 +112,11 @@ status() {
   kc -n "$APP_NS" exec deploy/delivery-service -- python -c "
 import socket
 host='${COURIER_DOMAIN}'
-ip=socket.gethostbyname(host)
+try:
+    ip=socket.gethostbyname(host)
+except socket.gaierror as e:
+    r='NXDOMAIN' if e.errno==socket.EAI_NONAME else 'EAI_'+str(e.errno)
+    print(f'  DNS  {host} -> {r} ({e})'); raise SystemExit(0)
 print(f'  DNS  {host} -> {ip}')
 try:
     socket.create_connection((ip,443),3).close(); print(f'  TCP  {ip}:443 연결 성공')
@@ -224,6 +249,16 @@ case "${1:-}" in
     set_courier_ip "$COURIER_NEW_IP"
     ok "사건 발생: 택배사가 IP 를 ${COURIER_NEW_IP} 로 변경. 방화벽에는 ${COURIER_OLD_IP} 만 허용된 상태"
     ;;
+  courier-missing)
+    remove_new_ip
+    courier_missing
+    ok "사건(변형): 사내 DNS 에 ${COURIER_DOMAIN} 레코드 없음 — 배송 조회가 즉시 502 (배송 서비스 로그: dns lookup failed … result=NXDOMAIN)"
+    ok "해결 장면: './demo.sh courier-register' (사내 DNS 에 다시 등록)"
+    ;;
+  courier-register)
+    set_courier_ip "$COURIER_OLD_IP"
+    ok "해결: 사내 DNS 에 ${COURIER_DOMAIN} → ${COURIER_OLD_IP} 등록 — 재시작 없이 다음 요청부터 회복"
+    ;;
   fix)
     allow_new_ip
     ok "해결: 방화벽에 ${COURIER_NEW_IP}:443 허용 추가"
@@ -265,7 +300,7 @@ case "${1:-}" in
   firewall) show_firewall ;;
   traffic)  kc -n "$INFRA_NS" logs -f deploy/loadgen --tail=20 ;;
   *)
-    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
     ;;
 esac

@@ -26,6 +26,10 @@ usage() {
   baseline         reset 과 같음
   traffic          부하 발생기 로그 실시간 보기 (Ctrl+C 로 종료)
 
+[변형 — 택배사 도메인을 못 찾음 (타임아웃 대신 DNS NXDOMAIN)]
+  courier-missing  사내 DNS 에서 택배사 도메인 레코드 삭제 → 배송 조회 즉시 502 (배송 서비스 로그: result=NXDOMAIN)
+  courier-register 해결: 택배사 레코드 다시 등록 → 재시작 없이 회복
+
 [추가 시나리오 — 외부 PG사 도메인 DNS 장애]
   pg-missing       PG 새 도메인이 사내 DNS 에 없음 → 결제 실패 (결제 서비스 로그: DNS NXDOMAIN)
   pg-register      해결: 사내 DNS 에 새 도메인 등록 → 재시작 없이 회복 (corporate: 등록될 때까지 대기)
@@ -70,7 +74,7 @@ case "$cmd" in
   push)           $S/build-images.sh --push ;;
   deploy)         $S/deploy.sh ;;
   security)       $S/security-check.sh ;;
-  status|incident|fix|reset|baseline|firewall|traffic|pg-missing|pg-register|pg-primary-down|pg-reset|pg-status)
+  status|incident|fix|reset|baseline|firewall|traffic|courier-missing|courier-register|pg-missing|pg-register|pg-primary-down|pg-reset|pg-status)
                   $S/scenario.sh "$cmd" ;;
   corpdns)        $S/corpdns.sh "$@" ;;
   restart)

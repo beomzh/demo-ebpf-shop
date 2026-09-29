@@ -84,6 +84,17 @@ fw-delivery-default             배송 서비스 egress 기본 규칙: 사내 DN
 
 ---
 
+## 변형 — 택배사 도메인을 못 찾음 (NXDOMAIN, 선택)
+
+방화벽 타임아웃 대신 **DNS 에러**로 같은 배송 조회 실패를 보여줄 때. 자세한 로그 예시는 [README 6-3](../README.md#6-3-변형--택배사-도메인을-못-찾음-nxdomain).
+
+| 순서 | 명령 / 화면 | 보여줄 것 | 멘트 요지 |
+| --- | --- | --- | --- |
+| 1 | `./demo.sh courier-missing` | 배송 조회 502 **즉시** | 사내 DNS 에서 택배사 레코드가 빠졌다 |
+| 2 | 배송 서비스 상세 → DNS 탭 | `api.courier.example` 조회의 **NXDOMAIN 증가**, 택배사로 가는 TCP 연결 없음 | 연결 문제가 아니라 이름을 못 찾는 문제 |
+| 3 | (터미널) `oc -n demo-shop logs deploy/delivery-service --since=1m \| grep "dns lookup failed" \| tail -1` | `result=NXDOMAIN … — 사내 DNS 에 이 도메인 레코드가 없음` | 앱 로그도 같은 원인을 가리킨다 |
+| 4 | `./demo.sh courier-register` | NXDOMAIN 멈춤, 배송 조회 200 | 레코드 한 줄 등록으로 재시작 없이 회복 |
+
 ## 추가 시나리오 — 외부 PG 도메인 DNS 장애 (선택)
 
 택배사 사건과 별개로 촬영합니다. 무대 구성(외부 PG사 nginx, 사내 DNS 주·보조 — 기본은 `demo-infra` 파드 `ns1-corp-dns-0`·`ns2-corp-dns-0`)과 로그 예시는 [README 6-2](../README.md#6-2-추가-시나리오--외부-pg-도메인-dns-장애).

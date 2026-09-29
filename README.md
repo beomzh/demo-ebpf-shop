@@ -931,6 +931,11 @@ fw-delivery-default           배송 서비스 egress 기본 규칙: 사내 DNS 
 | 배포 직후 / `reset` | 예전 IP | 예전 IP | 200, 수십 ms |
 | `incident` | **새 IP** | 예전 IP | **502, 약 5초** |
 | `fix` | 새 IP | 예전 IP + **새 IP** | 200, 수십 ms |
+| `courier-missing` (변형) | **NXDOMAIN** (레코드 없음) | 예전 IP | **502, 즉시** |
+| `courier-register` | 예전 IP | 예전 IP | 200, 수십 ms |
+
+**변형 — "도메인을 못 찾음"(NXDOMAIN) 으로 보여주고 싶을 때**: 방화벽 사건은 연결이 **5초 타임아웃**으로 보입니다.
+대신 DNS 에러를 보여주려면 사내 DNS 에서 택배사 도메인 레코드를 빼는 `courier-missing` 을 씁니다 → [6-3](#6-3-변형--택배사-도메인을-못-찾음-nxdomain).
 
 - Observ 화면은 네임스페이스 필터를 **`demo-shop`** 으로, 트랜잭션 조회 소스 토글은 **eBPF** 로 둡니다.
 - 화면별 진행·멘트·촬영 전 체크리스트·쓰지 않는 표현: **[docs/runbook.md](docs/runbook.md)**
@@ -1160,6 +1165,61 @@ eBPF: 결제 서비스 DNS 탭에서 조회 **지연·타임아웃**, 체크아�
 
 - PG 호출 자체는 HTTPS 이고 Node.js 의 TLS 내용은 eBPF 로 볼 수 없으므로(10장), **원인 설명은 DNS 탭 + 결제 서비스 로그**로 합니다.
 
+
+### 6-3. 변형 — 택배사 도메인을 못 찾음 (NXDOMAIN)
+
+방화벽 사건(`incident`)은 "DNS 는 정상, 새 IP 로 연결이 5초 타임아웃"입니다. 같은 배송 조회 실패를
+**"도메인을 못 찾는다"는 DNS 에러**로 보여주는 변형입니다. 사내 DNS 파드(`ns1/ns2-corp-dns`)의 존에서 택배사 레코드만 지웁니다.
+
+> 사내 DNS 정리 작업 중 택배사 도메인 레코드가 실수로 삭제됐다. 배송 조회가 전부, **즉시** 실패한다.
+> 다시 등록하자 **앱 재시작 없이** 회복된다.
+
+```bash
+./demo.sh courier-missing    # 사건: 사내 DNS 에서 api.courier.example 레코드 삭제 (주·보조 약 3초 안에 반영)
+./demo.sh status             # 레코드 NXDOMAIN, 배송 조회 502 즉시
+./demo.sh courier-register   # 해결: 예전 IP 로 다시 등록 (reset 도 같은 일을 함)
+```
+
+`status`:
+
+```
+[..] 사내 DNS 의 택배사 레코드 (서버별 조회)
+  primary   ns1-corp-dns(172.30.0.10)  api.courier.example → NXDOMAIN(ENOTFOUND) (0ms)
+  secondary ns2-corp-dns(172.30.0.11)  api.courier.example → NXDOMAIN(ENOTFOUND) (0ms)
+[..] 배송 서비스 파드에서 본 DNS 응답과 443 연결 (3초 제한)
+  DNS  api.courier.example -> NXDOMAIN ([Errno -2] Name or service not known)
+[..] 게이트웨이 → 주문 → 배송을 거친 배송 조회 1건
+  HTTP 502 0.03s
+  실패 경로: gateway-service → order-service[502] → delivery-service[503] → api.courier.example(-:443) [DNS NXDOMAIN: api.courier.example ([Errno -2] Name or service not known) after 0.00s]
+```
+
+**배송 서비스 로그 (Python) — 집중해서 볼 곳**
+
+```bash
+oc -n demo-shop logs deploy/delivery-service --since=1m | grep -A1 "dns lookup failed" | tail -2
+```
+
+```
+ERROR delivery-service dns lookup failed req=lg-… host=api.courier.example result=NXDOMAIN servers="172.30.0.10,172.30.0.11" — 사내 DNS 에 이 도메인 레코드가 없음
+ERROR delivery-service upstream call failed req=lg-… target=api.courier.example … ip=- stage=dns elapsedMs=0 order=1001 path="delivery-service → api.courier.example(-:443) [DNS NXDOMAIN: …]"
+Traceback (most recent call last):
+  …
+socket.gaierror: [Errno -2] Name or service not known
+```
+
+- `ip=-` : IP 를 얻지 못해 **연결 시도 자체가 없었음** → 방화벽 문제가 아니라 DNS 문제.
+- 사내 DNS 쪽에서도 확인: `./demo.sh corpdns logs` → `… → ns1-corp-dns(primary) A api.courier.example. NXDOMAIN …`
+
+| 비교 | 방화벽 사건 `incident` | 변형 `courier-missing` |
+| --- | --- | --- |
+| DNS 응답 | 새 IP (정상 응답) | **NXDOMAIN** |
+| 배송 조회 | 502, **약 5초** (연결 타임아웃) | 502, **즉시** |
+| 배송 서비스 로그 | `stage=connect ip=<새 IP> … timed out` | `dns lookup failed … result=NXDOMAIN`, `stage=dns ip=-` |
+| eBPF 에서 보이는 곳 | 네트워크 탭: 새 IP:443 **실패한 TCP 연결** | 배송 서비스 **DNS 탭: NXDOMAIN 증가**, 택배사로 가는 TCP 연결 없음 |
+| 해결 | `fix` (방화벽에 새 IP 허용) | `courier-register` (사내 DNS 에 다시 등록) |
+
+- corporate 모드에서는 실제 사내 DNS 를 건드리지 않으므로, `courier-missing` 이 삭제할 레코드를 안내하고 NXDOMAIN 이 될 때까지 기다립니다.
+
 ---
 
 ## 7. 코드를 바꾼 뒤 다시 반영하기 (git pull 이후)
@@ -1207,6 +1267,8 @@ oc login ...               # 세션이 만료됐다면
 | `firewall` | 방화벽 규칙 목록 | `scripts/scenario.sh firewall` |
 | `fix` | 방화벽에 새 IP 허용 | `scripts/scenario.sh fix` |
 | `reset` / `baseline` | 새 IP 규칙 삭제, DNS 를 예전 IP 로 | `scripts/scenario.sh reset` |
+| `courier-missing` | 변형 사건: 사내 DNS 에서 택배사 레코드 삭제 → NXDOMAIN | `scripts/scenario.sh courier-missing` |
+| `courier-register` | 변형 해결: 택배사 레코드 다시 등록 | `scripts/scenario.sh courier-register` |
 | `traffic` | 부하 발생기 로그 실시간 | `scripts/scenario.sh traffic` |
 | `pg-missing` | PG 새 도메인이 사내 DNS 에 없음 (사건) | `scripts/scenario.sh pg-missing` |
 | `pg-register` | 사내 DNS 에 새 도메인 등록 (해결). corporate 모드는 등록될 때까지 대기 | `scripts/scenario.sh pg-register` |
