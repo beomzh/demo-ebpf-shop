@@ -86,7 +86,7 @@ fw-delivery-default             배송 서비스 egress 기본 규칙: DNS 만 �
 
 ## 추가 시나리오 — 외부 PG 도메인 DNS 장애 (선택)
 
-택배사 사건과 별개로 촬영합니다. 무대 구성(외부 PG사 nginx, 사내 DNS 주·보조)과 로그 예시는 [README 6-2](../README.md#6-2-추가-시나리오--외부-pg-도메인-dns-장애).
+택배사 사건과 별개로 촬영합니다. 무대 구성(외부 PG사 nginx, 사내 DNS 주·보조 — 기본은 `demo-infra` 파드 `ns1-corp-dns-0`·`ns2-corp-dns-0`)과 로그 예시는 [README 6-2](../README.md#6-2-추가-시나리오--외부-pg-도메인-dns-장애).
 장애는 **결제 서비스(Node.js)** 에서만 납니다 — 외부 PG 를 부르는 유일한 서비스입니다.
 
 | 순서 | 명령 | 화면 | 보여줄 것 | 말할 것 |
@@ -97,6 +97,7 @@ fw-delivery-default             배송 서비스 egress 기본 규칙: DNS 만 �
 | 3 | `./demo.sh pg-register` (corporate: 주 DNS 에 레코드 추가) | DNS 탭, 체크아웃 | NXDOMAIN 멈춤, 체크아웃 201 | 사내 DNS 에 한 줄 등록하자 **앱 재시작 없이** 회복 |
 | 4 | `./demo.sh pg-reset` (corporate: 새 레코드 삭제 후) | | 원래 상태 | 다음 테이크 준비 |
 | (별도) | `./demo.sh pg-primary-down` → `grep "dns fallback"` | DNS 탭 지연, 체크아웃 +2초 | `primary … → TIMEOUT (2007ms) \| secondary … → IP` | 주 DNS 가 죽으면 보조로 넘어가지만 매번 2초씩 기다린다 |
+| (별도, cluster 모드) | 터미널 1: `./demo.sh corpdns logs` / 터미널 2: `./demo.sh pg-primary-down` | 사내 DNS 파드 로그 | `ns1-corp-dns(primary)` 로그가 멈추고 같은 결제 파드 질의가 `ns2-corp-dns(secondary)` 에 찍힘 | 주 → 보조 전환을 DNS 서버 쪽에서도 확인 |
 
 - 촬영 전 `./demo.sh pg-status` 로 체크아웃이 201 인지 확인합니다.
 - PG 호출(HTTPS)의 내용은 Node.js 라 eBPF 로 볼 수 없습니다. 대본에서 "PG 호출 오류율" 대신 **DNS 탭의 NXDOMAIN·지연**으로 말합니다.

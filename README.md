@@ -105,9 +105,9 @@ flowchart LR
     PGAPI["PG사 API<br/>PG_IP:443"]
   end
 
-  subgraph C["사내 DNS"]
-    D1["주 DNS"]
-    D2["보조 DNS"]
+  subgraph C["사내 DNS (기본: demo-infra 파드)"]
+    D1["주 DNS<br/>ns1-corp-dns-0"]
+    D2["보조 DNS<br/>ns2-corp-dns-0"]
   end
 
   DLV -->|"① 도메인 조회"| CDNS
@@ -131,7 +131,7 @@ flowchart LR
 | 시나리오 | 장애가 나는 서비스 | 도메인 조회 | 외부 목적지 | 장애를 만드는 장치 | 명령 |
 | --- | --- | --- | --- | --- | --- |
 | ① 택배사 IP 변경 | 배송 (Python) | **courier-dns** — 클러스터 안(`demo-infra`), 택배사 도메인 전용 | nginx 의 택배사 API (예전 IP / 새 IP) | 방화벽(NetworkPolicy)에 새 IP 없음 | `incident` → `firewall` → `fix` |
-| ② PG 도메인 DNS 장애 | 결제 (Node.js) | **사내 DNS 주·보조** — 클러스터 밖, 결제 서비스가 직접 질의 | nginx 의 PG사 API (`PG_IP`) | 사내 DNS 에 새 PG 도메인 미등록 / 주 DNS 무응답 | `pg-missing` → `pg-register` / `pg-primary-down` |
+| ② PG 도메인 DNS 장애 | 결제 (Node.js) | **사내 DNS 주·보조** — 결제 서비스가 직접 질의. 기본은 `demo-infra` 의 파드 `ns1-corp-dns-0`(주)·`ns2-corp-dns-0`(보조) | nginx 의 PG사 API (`PG_IP`) | 사내 DNS 에 새 PG 도메인 미등록 / 주 DNS 무응답 | `pg-missing` → `pg-register` / `pg-primary-down` |
 
 ### 사용자 요청별 호출 경로
 
@@ -205,7 +205,7 @@ for d in gateway-service order-service delivery-service; do echo "== $d"; oc -n 
 | `courier-dns` | 택배사 도메인의 DNS | 클러스터 안 CoreDNS, `hosts` 한 줄. `incident` 가 IP 를 바꿈 (`demo-infra`) |
 | `fw-*` NetworkPolicy | 사내 방화벽 | 배송 서비스의 나가는 연결 허용 목록. 택배사 예전 IP 만 허용 |
 | 외부 API 호스트 (`courier-ext/`) | 외부 택배사 API + 외부 PG사 API | 클러스터 **밖** 리눅스 호스트의 nginx 1대(HTTPS). 요청 도메인(TLS SNI)으로 택배사·PG 를 구분해 응답. 택배사는 예전 IP·새 IP, PG 는 `PG_IP`(기본: 택배사 예전 IP) |
-| 사내 DNS 주·보조 | 회사의 DNS 서버 2대 | 결제 서비스가 PG 도메인을 직접 질의. bastion 모드: `corpdns-ext/` 의 CoreDNS 2개 / corporate 모드: 실제 사내 DNS (예: BIND master·slave) — [5-5b](#5-5b-사내-dns-준비--pg-시나리오용) |
+| 사내 DNS 주·보조 | 회사의 DNS 서버 2대 | 결제 서비스가 PG 도메인을 직접 질의. **cluster 모드(기본)**: `demo-infra` 의 CoreDNS 파드 `ns1-corp-dns-0`(주)·`ns2-corp-dns-0`(보조) / bastion 모드: `corpdns-ext/` 의 CoreDNS 컨테이너 2개 / corporate 모드: 실제 사내 DNS (예: BIND master·slave) — [5-5b](#5-5b-사내-dns-준비--pg-시나리오용) |
 
 **장애가 나는 원리**: DNS 가 새 IP 를 돌려주면 배송 서비스가 새 IP 로 TCP 연결을 시도합니다.
 방화벽(NetworkPolicy)이 SYN 을 조용히 버리므로 연결은 5초 뒤 타임아웃되고, 배송 서비스는 주문 서비스에 503,
@@ -233,7 +233,7 @@ for d in gateway-service order-service delivery-service; do echo "== $d"; oc -n 
 | 5-3 설정 파일 | 작업 PC | `cp demo.env.example demo.env` → IP 2개 수정 | 처음 한 번 |
 | 5-4 인증서 | 작업 PC | `./demo.sh certs` | 처음 한 번 |
 | 5-5 택배사 호스트 | 택배사 호스트 | 보조 IP 추가 → `sudo ./run.sh up` | 처음 한 번 |
-| 5-5b 사내 DNS (PG 시나리오) | bastion / 사내 DNS 서버 | bastion 모드: IP 2개 추가 → `./demo.sh certs` → `sudo ./courier-ext/run.sh up` → `sudo ./demo.sh corpdns up`<br/>corporate 모드: 사내 DNS 에 PG 레코드 등록 (또는 BIND 주·보조 직접 구성) → `./demo.sh certs` → `sudo ./courier-ext/run.sh up` | 처음 한 번 |
+| 5-5b 사내 DNS (PG 시나리오) | bastion / 사내 DNS 서버 | **cluster 모드(기본): 준비 없음** — `deploy` 가 사내 DNS 파드를 만듦 (PG 용 nginx 는 5-5 에서 이미 뜸)<br/>bastion 모드: IP 2개 추가 → `./demo.sh certs` → `sudo ./courier-ext/run.sh up` → `sudo ./demo.sh corpdns up`<br/>corporate 모드: 사내 DNS 에 PG 레코드 등록 (또는 BIND 주·보조 직접 구성) → `./demo.sh certs` → `sudo ./courier-ext/run.sh up` | 처음 한 번 |
 | 5-6 레지스트리 route | 작업 PC | `./demo.sh registry-route` | 클러스터당 한 번 |
 | 5-7 사전 점검 | 작업 PC | `./demo.sh check` | 배포 전 |
 | 5-8 이미지 push | 작업 PC | `./demo.sh push` | 처음·코드 변경 때 |
@@ -283,11 +283,12 @@ for d in gateway-service order-service delivery-service; do echo "== $d"; oc -n 
 
 ### 사내 DNS (추가 시나리오용)
 
-결제 서비스는 PG 도메인을 **사내 DNS(주·보조)** 에 직접 물어봅니다. 두 가지 중 하나로 준비합니다 (`CORP_DNS_MODE`).
+결제 서비스는 PG 도메인을 **사내 DNS(주·보조)** 에 직접 물어봅니다. 세 가지 중 하나로 준비합니다 (`CORP_DNS_MODE`).
 
 | 모드 | 사내 DNS | 시나리오 재현 방법 | 준비 |
 | --- | --- | --- | --- |
-| `bastion` (기본) | 이 저장소의 `corpdns-ext/` 로 bastion 에 주·보조 DNS 2대 (CoreDNS) | 레코드를 실제로 지우고, 주 DNS 를 실제로 멈춘다 | bastion 에 IP 2개 추가, 53/udp 비어 있어야 함 |
+| `cluster` (기본) | `demo-infra` 네임스페이스의 CoreDNS 파드 2개 — 주 `ns1-corp-dns-0`, 보조 `ns2-corp-dns-0` | 레코드를 실제로 지우고, 주 DNS 로 들어오는 질의를 NetworkPolicy 로 버린다. **파드 로그로 주 → 보조 전환이 보인다** | 없음 (`deploy` 가 만들고 주소도 자동) |
+| `bastion` | 이 저장소의 `corpdns-ext/` 로 bastion 에 주·보조 DNS 2대 (CoreDNS 컨테이너) | 레코드를 실제로 지우고, 주 DNS 를 실제로 멈춘다 | bastion 에 IP 2개 추가, 53/udp 비어 있어야 함 |
 | `corporate` | 실제 사내 DNS 서버 2대 | 사내 DNS 는 건드리지 않는다. 등록 안 된 새 PG 도메인으로 교체 / 주 DNS 로 가는 패킷 차단(NetworkPolicy) | 사내 DNS 에 `PG_DOMAIN → PG_IP` A 레코드 등록, 노드 → 사내 DNS 53/udp 허용 |
 
 > **예전 IP·새 IP 고르기**: 택배사 호스트의 현재 IP 를 예전 IP 로, 같은 서브넷에서 비어 있는 IP 하나를 새 IP 로
@@ -359,8 +360,8 @@ COURIER_NEW_IP=10.0.0.62     # 택배사 호스트에 새로 붙일 보조 IP
 | `PLATFORM` | `linux/amd64` | 클러스터 노드 아키텍처 |
 | `PG_DOMAIN` | `api.pg.example` | 외부 PG사 도메인 (공인 DNS 등록 불필요) |
 | `PG_IP` | (비움 = `COURIER_OLD_IP`) | PG 도메인이 가리킬 IP. 택배사 호스트 nginx 가 PG 도 응답 |
-| `CORP_DNS_PRIMARY` / `CORP_DNS_SECONDARY` | `10.0.0.63` / `10.0.0.64` | 사내 DNS 주·보조 IP |
-| `CORP_DNS_MODE` | `bastion` | `bastion`(이 저장소로 띄움) 또는 `corporate`(실제 사내 DNS) |
+| `CORP_DNS_MODE` | `cluster` | `cluster`(사내 DNS 를 파드로 띄움), `bastion`(bastion 에 컨테이너로 띄움), `corporate`(실제 사내 DNS) |
+| `CORP_DNS_PRIMARY` / `CORP_DNS_SECONDARY` | `10.0.0.63` / `10.0.0.64` | 사내 DNS 주·보조 IP. **bastion·corporate 모드에서만** (cluster 모드는 서비스 ClusterIP 를 자동으로 씀) |
 | `PG_UNREGISTERED_DOMAIN` | `api-new.pg.example` | corporate 모드의 "레코드 없음" 재현에 쓸 이름. **PG 도메인과 같은 존 안의, 사내 DNS 에 없는 이름** |
 | `LOADGEN_REPLICAS` | `1` | 부하 발생기 파드 수 (파드 1개 = 초당 체크아웃·배송 조회·둘러보기 각 1건) — [6-1](#6-1-요청량-늘리기) |
 | `LOADGEN_*_INTERVAL` | `1` | 파드 하나의 요청 간격(초) |
@@ -534,7 +535,38 @@ curl -sk --resolve api.courier.example:443:10.0.0.62 https://api.courier.example
 
 ### 5-5b. 사내 DNS 준비 — PG 시나리오용
 
-#### bastion 모드 (`CORP_DNS_MODE=bastion`) **[bastion]**
+#### cluster 모드 (`CORP_DNS_MODE=cluster`, 기본) — 준비할 것 없음
+
+사내 DNS 주·보조를 `demo-infra` 네임스페이스에 **파드로** 띄웁니다. `./demo.sh deploy` 가 알아서 만들고,
+결제 서비스에는 두 서비스의 ClusterIP 가 `PG_DNS_SERVERS=ns1-corp-dns=<IP>,ns2-corp-dns=<IP>` 로 들어갑니다.
+bastion 에 IP 를 붙이거나 53 포트를 비울 필요가 없습니다. PG 용 nginx 는 5-5 에서 띄운 외부 API 호스트의 nginx 를 그대로 씁니다.
+
+| 리소스 (`demo-infra`) | 역할 |
+| --- | --- |
+| 파드 `ns1-corp-dns-0` / 서비스 `ns1-corp-dns` | **주 DNS** — 결제 서비스가 먼저 묻는 서버 |
+| 파드 `ns2-corp-dns-0` / 서비스 `ns2-corp-dns` | **보조 DNS** — 주 DNS 가 응답하지 않을 때 묻는 서버 |
+| ConfigMap `corp-dns-zone` | 두 서버가 함께 읽는 존 (= 주 → 보조 존 복제가 끝난 상태). 레코드는 `corpdns record-add/remove` 로 바꿈 (약 2초 안에 반영) |
+| NetworkPolicy `allow-corp-dns-primary-from-payment` / `…-secondary-…` | `demo-infra` 는 인바운드 기본 차단이라 결제 서비스 → 주·보조 DNS 를 서버별로 허용. **`pg-primary-down` 은 주 DNS 쪽 허용 정책을 지웁니다** → 주 DNS 로 가는 질의가 버려짐 (파드는 살아 있음) |
+
+배포 후 확인:
+
+```bash
+./demo.sh corpdns status
+# POD              ROLE        STATUS    POD-IP        NODE
+# ns1-corp-dns-0   primary     Running   10.128.2.15   worker-1
+# ns2-corp-dns-0   secondary   Running   10.131.0.22   worker-2
+# 서비스: 주 ns1-corp-dns 172.30.0.10, 보조 ns2-corp-dns 172.30.0.11
+# 등록된 레코드:
+#   api.pg.example → 10.0.0.61
+
+./demo.sh pg-status          # 두 서버 모두 api.pg.example → PG_IP, 체크아웃 201
+./demo.sh corpdns logs       # 두 서버의 질의 로그를 한 화면에 (Ctrl+C 로 종료)
+```
+
+bastion 모드·corporate 모드에서 쓰던 `demo.env` 라면 `CORP_DNS_MODE=cluster` 로 바꾸고 `./demo.sh push`(결제 서비스 이미지 갱신) → `./demo.sh deploy` 하면 됩니다.
+bastion 의 `corp-dns-*` 컨테이너와 사내 DNS 용 IP(`.63`·`.64`)는 더 이상 필요 없습니다 (`sudo ./corpdns-ext/run.sh down`).
+
+#### bastion 모드 (`CORP_DNS_MODE=bastion`) **[bastion]** — 클러스터 밖에 사내 DNS 를 두고 싶을 때
 
 bastion 에 IP 2개를 더 붙이고, 그 두 IP 의 53 에서만 받는 주·보조 DNS 를 띄웁니다.
 
@@ -932,9 +964,9 @@ flowchart LR
   subgraph k8s["클러스터 (demo-shop)"]
     GW["게이트웨이<br/>C#"] --> ORD["주문<br/>Java"] --> PAY["결제<br/>Node.js"]
   end
-  subgraph corp["사내 DNS (클러스터 밖)"]
-    D1["주 DNS"]
-    D2["보조 DNS"]
+  subgraph corp["사내 DNS (cluster 모드: demo-infra 파드)"]
+    D1["주 DNS<br/>ns1-corp-dns-0"]
+    D2["보조 DNS<br/>ns2-corp-dns-0"]
   end
   subgraph ext["외부 PG사 (클러스터 밖, nginx)"]
     PG["https://api.pg.example<br/>/v1/payments/approve"]
@@ -948,8 +980,8 @@ flowchart LR
 | --- | --- | --- |
 | **결제 서비스** (Node.js) | 체크아웃 때 외부 PG사에 **승인**을 요청. **외부 PG 를 부르는 유일한 서비스** | `demo-shop/payment-service` |
 | **외부 PG사** | 결제 승인 API (`POST /v1/payments/approve`) | 외부 API 호스트의 nginx — 택배사 API 와 같은 nginx 가 TLS SNI 로 구분해 응답. PG 도메인은 `PG_IP`(기본: 택배사 예전 IP)를 가리킴 |
-| **사내 주 DNS** | PG 도메인을 `PG_IP` 로 답함. 결제 서비스가 **먼저** 묻는 서버 | bastion 모드: bastion 의 CoreDNS 컨테이너 / corporate 모드: 실제 사내 DNS (예: BIND master) |
-| **사내 보조 DNS** | 주 DNS 가 **응답하지 않을 때만** 묻는 서버 | bastion 모드: CoreDNS 컨테이너 / corporate 모드: 실제 사내 DNS (예: BIND slave) |
+| **사내 주 DNS** | PG 도메인을 `PG_IP` 로 답함. 결제 서비스가 **먼저** 묻는 서버 | cluster 모드: 파드 `demo-infra/ns1-corp-dns-0` / bastion 모드: bastion 의 CoreDNS 컨테이너 / corporate 모드: 실제 사내 DNS (예: BIND master) |
+| **사내 보조 DNS** | 주 DNS 가 **응답하지 않을 때만** 묻는 서버 | cluster 모드: 파드 `demo-infra/ns2-corp-dns-0` / bastion 모드: CoreDNS 컨테이너 / corporate 모드: 실제 사내 DNS (예: BIND slave) |
 
 - 결제 서비스는 PG 도메인을 클러스터 DNS 가 아니라 **사내 DNS 에 직접**, 주 → 보조 순서로 묻습니다 (요청마다 새로 조회).
 - 주 DNS 가 **"그런 이름 없음"(NXDOMAIN)** 이라고 답하면 확정 답이라 보조로 넘어가지 않습니다. 주 DNS 가 **응답이 없을 때(타임아웃)** 만 보조로 넘어갑니다 — OS 리졸버와 같은 동작.
@@ -961,20 +993,20 @@ flowchart LR
 > 그런데 **사내 DNS 에 새 도메인 등록이 누락**돼 결제가 전부 실패한다. 코드 문제가 아니라 DNS 문제다.
 > 사내 DNS 에 새 도메인을 등록하자 **앱 재시작 없이** 바로 회복된다.
 
-| 명령 | 단계 | bastion 모드에서 하는 일 | corporate 모드에서 하는 일 | 사용자 결과 |
+| 명령 | 단계 | cluster·bastion 모드에서 하는 일 | corporate 모드에서 하는 일 | 사용자 결과 |
 | --- | --- | --- | --- | --- |
 | `./demo.sh pg-status` | 정상 확인 | 서버별 조회 결과 + 체크아웃 1건 | 〃 | 주·보조 모두 PG IP, 체크아웃 201 |
 | `./demo.sh pg-missing` | 사건 | 결제 서비스의 PG 도메인을 `PG_UNREGISTERED_DOMAIN` 으로 교체(재시작) + 데모 사내 DNS 에 그 레코드가 없게 | 결제 서비스의 PG 도메인을 `PG_UNREGISTERED_DOMAIN` 으로 교체(재시작) — 사내 DNS 에 없는 이름 | 체크아웃 **502**, 즉시 |
 | `./demo.sh pg-register` | **해결** | 데모 사내 DNS 에 새 도메인 A 레코드 등록 | 등록할 레코드를 안내하고 **주·보조 모두에서 조회될 때까지 기다림** (담당자가 등록하는 순간이 시연 장면) | **앱 재시작 없이** 체크아웃 201 |
 | `./demo.sh pg-reset` | 되돌리기 | 원래 도메인으로, 새 도메인 레코드 삭제, 주 DNS 재개 | 원래 도메인으로, 차단 정책 삭제 (사내 DNS 에 새 도메인이 남아 있으면 알려 줌) | 체크아웃 201 |
-| `./demo.sh pg-primary-down` | 별도 사건 | 주 DNS 컨테이너 일시정지 (안 되면 nftables 로 53 drop) | 결제 → 주 DNS 패킷 drop (NetworkPolicy) | 체크아웃 **201**, 약 2초 느려짐 |
+| `./demo.sh pg-primary-down` | 별도 사건 | cluster: 결제 → 주 DNS 허용 정책 삭제 (기본 차단이 질의를 drop) / bastion: 주 DNS 컨테이너 일시정지 (안 되면 nftables 로 53 drop) | 결제 → 주 DNS 패킷 drop (NetworkPolicy) | 체크아웃 **201**, 약 2초 느려짐 |
 
 #### 1) 정상 상태
 
 ```
 $ ./demo.sh pg-status
-  primary   10.0.0.63  api.pg.example → 10.0.0.61 (1ms)
-  secondary 10.0.0.64  api.pg.example → 10.0.0.61 (1ms)
+  primary   ns1-corp-dns(172.30.0.10)  api.pg.example → 10.0.0.61 (1ms)
+  secondary ns2-corp-dns(172.30.0.11)  api.pg.example → 10.0.0.61 (1ms)
   HTTP 201 0.2s
 ```
 
@@ -986,11 +1018,13 @@ $ ./demo.sh pg-status
 
 ```
 $ ./demo.sh pg-status
-  primary   10.0.0.63  api-new.pg.example → NXDOMAIN (ENOTFOUND, 1ms)
-  secondary 10.0.0.64  api-new.pg.example → NXDOMAIN (ENOTFOUND, 1ms)
+  primary   ns1-corp-dns(172.30.0.10)  api-new.pg.example → NXDOMAIN(ENOTFOUND) (1ms)
+  secondary ns2-corp-dns(172.30.0.11)  api-new.pg.example → NXDOMAIN(ENOTFOUND) (1ms)
   HTTP 502 0.06s
-  실패 경로: gateway-service → order-service[502] → payment-service[504] → pg(api-new.pg.example) [DNS NXDOMAIN: api-new.pg.example (queryA ENOTFOUND api-new.pg.example) — primary 10.0.0.63 → NXDOMAIN (ENOTFOUND, 1ms)]
+  실패 경로: gateway-service → order-service[502] → payment-service[504] → pg(api-new.pg.example) [DNS NXDOMAIN: api-new.pg.example (queryA ENOTFOUND api-new.pg.example) — primary ns1-corp-dns(172.30.0.10) → NXDOMAIN (ENOTFOUND, 1ms)]
 ```
+
+(bastion·corporate 모드는 서버가 이름 없이 IP 로만 나옵니다. 예: `primary 10.0.0.63`)
 
 #### 3) 원인 확인 — 어디를 보나
 
@@ -1006,15 +1040,16 @@ kubectl -n demo-shop logs deploy/payment-service --since=1m | grep -A3 "dns look
 ```
 
 ```
-ERROR payment-service dns lookup failed req=lg-… host=api-new.pg.example result=NXDOMAIN server="primary 10.0.0.63" — 사내 DNS 에 이 도메인 레코드가 없음
+ERROR payment-service dns lookup failed req=lg-… host=api-new.pg.example result=NXDOMAIN server="primary ns1-corp-dns(172.30.0.10)" — 사내 DNS 에 이 도메인 레코드가 없음
 ERROR payment-service upstream call failed req=lg-… target=pg(api-new.pg.example) call="POST https://api-new.pg.example/v1/payments/approve" status=0 elapsedMs=2 orderId=1006
-      dns="primary 10.0.0.63 → NXDOMAIN (ENOTFOUND, 1ms)" path="payment-service → pg(api-new.pg.example) [DNS NXDOMAIN: …]"
+      dns="primary ns1-corp-dns(172.30.0.10) → NXDOMAIN (ENOTFOUND, 1ms)" path="payment-service → pg(api-new.pg.example) [DNS NXDOMAIN: …]"
 Error: queryA ENOTFOUND api-new.pg.example
     at QueryReqWrap.onresolve [as oncomplete] (node:internal/dns/promises:292:17)
 ```
 
 - 첫 줄이 원인입니다: **어느 도메인을, 어느 DNS 에 물었고, NXDOMAIN 이라는 답을 받았다.**
 - 보조 DNS 로 넘어가지 않은 것이 정상입니다 (NXDOMAIN 은 확정 답).
+- cluster 모드는 사내 DNS 쪽 로그로도 확인됩니다: `./demo.sh corpdns logs` → `… → ns1-corp-dns(primary) A api-new.pg.example. NXDOMAIN …`
 
 **③ 게이트웨이 로그 (C#)** — 한 줄에 사용자 → 주문 → 결제 → PG 전체 경로:
 
@@ -1026,7 +1061,7 @@ kubectl -n demo-shop logs deploy/gateway-service --since=1m | grep "step=order" 
 
 #### 4) 해결 — `./demo.sh pg-register`
 
-- **bastion 모드**: 데모 사내 DNS 에 `api-new.pg.example → PG_IP` 가 등록되고, 곧바로 회복을 확인합니다.
+- **cluster·bastion 모드**: 데모 사내 DNS 에 `api-new.pg.example → PG_IP` 가 등록되고(주·보조 모두 약 2초 안에 반영), 곧바로 회복을 확인합니다.
 - **corporate 모드**: `pg-register` 를 먼저 띄워 두면 등록할 레코드를 안내하고 기다립니다. 주 DNS 에 레코드를 추가하면(아래) 주·보조 모두 조회되는 순간 회복을 확인합니다.
 
   ```
@@ -1046,25 +1081,65 @@ eBPF DNS 탭에서도 NXDOMAIN 이 멈추고 NOERROR 로 바뀝니다.
 
 #### 5) 다음 테이크 준비 — `./demo.sh pg-reset`
 
-- 결제 서비스를 원래 도메인으로 돌립니다. bastion 모드는 새 도메인 레코드도 지웁니다.
+- 결제 서비스를 원래 도메인으로 돌립니다. cluster·bastion 모드는 새 도메인 레코드도 지우고 주 DNS 를 되살립니다.
 - corporate 모드는 사내 DNS 의 `api-new` 레코드를 **직접 지워야**(시리얼 +1, `rndc reload`) 다음 `pg-missing` 에서 다시 NXDOMAIN 이 납니다. 남아 있으면 `pg-reset` 이 알려 줍니다.
 
-#### 별도 사건: 주 DNS 장애 — `./demo.sh pg-primary-down`
+#### 별도 사건: 주 DNS 장애 — `./demo.sh pg-primary-down` (주 → 보조 전환 확인)
 
 주 DNS 가 응답하지 않으면 결제 서비스가 2초 기다린 뒤 보조 DNS 로 넘어갑니다. 결제는 성공하지만 **약 2초 느려집니다.**
+cluster 모드는 주 DNS 파드를 죽이지 않고, **결제 서비스 → 주 DNS 허용 정책(`allow-corp-dns-primary-from-payment`)을 지웁니다.**
+`demo-infra` 의 인바운드 기본 차단 정책이 주 DNS 로 가는 질의를 버리고, 파드는 `Running` 그대로입니다. `primary-up`·`pg-reset` 이 정책을 되살립니다.
+
+터미널 두 개로 보면 전환이 잘 보입니다:
+
+```bash
+# 터미널 1 — 사내 DNS 두 서버의 질의 로그 (cluster 모드)
+./demo.sh corpdns logs
+
+# 터미널 2
+./demo.sh pg-primary-down
+./demo.sh pg-status
+```
+
+**전환 전** — 모든 질의를 주 DNS 가 받습니다:
 
 ```
-WARN payment-service dns fallback req=lg-… host=api.pg.example attempts="primary 10.0.0.63 → TIMEOUT (ETIMEOUT, 2007ms) | secondary 10.0.0.64 → 10.0.0.61 (2ms)"
+[pod/ns1-corp-dns-0/coredns] [INFO] 10.128.2.31 → ns1-corp-dns(primary) A api.pg.example. NOERROR 0.0001s
+[pod/ns1-corp-dns-0/coredns] [INFO] 10.128.2.31 → ns1-corp-dns(primary) A api.pg.example. NOERROR 0.0001s
 ```
 
-주·보조 둘 다 응답하지 않으면 (보조까지 멈추려면 bastion 에서 `sudo podman pause corp-dns-secondary`):
+**`pg-primary-down` 뒤** — 주 DNS 로그가 멈추고 같은 결제 파드(`10.128.2.31`)의 질의가 보조 DNS 에 찍힙니다:
 
 ```
-ERROR payment-service dns lookup failed … result=TIMEOUT server="secondary 10.0.0.64" — 사내 DNS 가 응답하지 않음
+[pod/ns2-corp-dns-0/coredns] [INFO] 10.128.2.31 → ns2-corp-dns(secondary) A api.pg.example. NOERROR 0.0001s
+[pod/ns2-corp-dns-0/coredns] [INFO] 10.128.2.31 → ns2-corp-dns(secondary) A api.pg.example. NOERROR 0.0001s
+```
+
+```
+$ ./demo.sh pg-status
+  primary   ns1-corp-dns(172.30.0.10)  api.pg.example → TIMEOUT(ETIMEOUT) (2002ms)
+  secondary ns2-corp-dns(172.30.0.11)  api.pg.example → 10.0.0.61 (1ms)
+  HTTP 201 2.1s
+```
+
+결제 서비스 로그 (Node.js):
+
+```
+WARN payment-service dns fallback req=lg-… host=api.pg.example attempts="primary ns1-corp-dns(172.30.0.10) → TIMEOUT (ETIMEOUT, 2007ms) | secondary ns2-corp-dns(172.30.0.11) → 10.0.0.61 (2ms)"
+```
+
+- 주 DNS 로 가는 패킷을 **버리는지(drop)** 거절하는지는 CNI 에 따라 다릅니다. OVN-Kubernetes·Calico(canal)는 버려서 `TIMEOUT`(2초 뒤 전환)이고,
+  거절(ICMP)하는 CNI(예: k3s 기본 kube-router)는 `CONNREFUSED` 로 **즉시** 보조로 넘어갑니다. 어느 쪽이든 보조로 전환되는 것은 같습니다.
+- 복구: `./demo.sh corpdns primary-up` (주 DNS 만) 또는 `./demo.sh pg-reset` (PG 시나리오 전체).
+
+주·보조 둘 다 응답하지 않으면 (보조까지 멈추려면 bastion 모드에서 `sudo podman pause corp-dns-secondary`, cluster 모드에서 `oc -n demo-infra scale statefulset ns2-corp-dns --replicas=0`):
+
+```
+ERROR payment-service dns lookup failed … result=TIMEOUT server="secondary ns2-corp-dns(172.30.0.11)" — 사내 DNS 가 응답하지 않음
 Error: queryA ETIMEOUT api.pg.example
 ```
 
-eBPF: 결제 서비스 DNS 탭에서 조회 **지연·타임아웃**, 체크아웃 지연 증가. 복구는 `./demo.sh pg-reset`.
+eBPF: 결제 서비스 DNS 탭에서 조회 **지연·타임아웃**, 체크아웃 지연 증가. 복구는 `./demo.sh pg-reset` (보조를 0 으로 줄였다면 `--replicas=1` 로 되돌림).
 
 | 상황 | 결제 서비스 로그 `result=` | 사용자 결과 |
 | --- | --- | --- |
@@ -1090,7 +1165,8 @@ oc login ...               # 세션이 만료됐다면
 ```
 
 - **PG 시나리오가 추가된 버전으로 업데이트할 때**: 배포 전에 `demo.env` 에 PG·사내 DNS 항목을 추가하고(`diff demo.env.example demo.env`),
-  [5-5b](#5-5b-사내-dns-준비--pg-시나리오용) 를 먼저 하세요 (`./demo.sh certs` → `sudo ./courier-ext/run.sh up` → `sudo ./demo.sh corpdns up`).
+  [5-5b](#5-5b-사내-dns-준비--pg-시나리오용) 를 먼저 하세요 (cluster 모드: `./demo.sh certs` → `sudo ./courier-ext/run.sh up` 만, 사내 DNS 는 deploy 가 만듦
+  / bastion 모드: 여기에 더해 `sudo ./demo.sh corpdns up`).
   PG·사내 DNS 준비 없이 배포하면 체크아웃이 PG 승인 단계에서 실패합니다.
 - **네임스페이스 이름이 `shop` → `demo-shop` 으로 바뀐 버전으로 업데이트할 때**: 이전 `shop` 네임스페이스(파드·ImageStream 포함)는
   자동으로 지워지지 않습니다. 새 버전을 `push` → `deploy` 한 뒤 옛 네임스페이스를 지우세요:
@@ -1127,7 +1203,7 @@ oc login ...               # 세션이 만료됐다면
 | `pg-primary-down` | 사내 주 DNS 장애 재현 | `scripts/scenario.sh pg-primary-down` |
 | `pg-reset` | PG 시나리오 복구 | `scripts/scenario.sh pg-reset` |
 | `pg-status` | 사내 DNS 서버별 조회 + 체크아웃 1건 | `scripts/scenario.sh pg-status` |
-| `corpdns <명령>` | bastion 사내 DNS: `up`·`down`·`status`·`logs`·`records`·`record-add [도메인]`·`record-remove [도메인]`·`primary-down`·`primary-up` (root) | `corpdns-ext/run.sh` |
+| `corpdns <명령>` | 사내 DNS 조작 — cluster 모드: `ns1/ns2-corp-dns` 파드, bastion 모드: 컨테이너(root). `status`·`logs [primary\|secondary\|all]`·`records`·`record-add [도메인]`·`record-remove [도메인]`·`primary-down`·`primary-up`·`up`·`down` | `scripts/corpdns.sh` (bastion 은 `corpdns-ext/run.sh`) |
 | `restart` | 여덟 서비스 재시작 | `demo.sh` |
 | `images` | ImageStream·태그·pull 주소 | `demo.sh` |
 | `cleanup` | `demo-shop`, `demo-infra` 삭제 (ImageStream 포함, 확인 질문 있음) | `scripts/cleanup.sh` |

@@ -5,7 +5,7 @@
 #                                 ├→ member → mysql
 #                                 └→ order ─┬→ member
 #                                           ├→ inventory
-#                                           ├→ payment → member
+#                                           ├→ payment → member (+ demo-infra/ns1·ns2-corp-dns → 외부 PG)
 #                                           ├→ notification → member
 #                                           └→ delivery → demo-infra/courier-dns (+ 외부 택배사)
 #

@@ -9,7 +9,7 @@
 #   firewall   방화벽 규칙 목록만 출력 (데모 3-4 "방화벽 규칙 확인" 장면용)
 #   traffic    부하 발생기 로그 실시간 보기
 #
-# 추가 시나리오 — 외부 PG사 도메인 DNS 장애 (주문·결제 서비스가 사내 DNS 로 PG 도메인 조회)
+# 추가 시나리오 — 외부 PG사 도메인 DNS 장애 (결제 서비스만 사내 DNS 로 PG 도메인 조회)
 #   pg-missing       PG사가 새 도메인으로 이전 → 결제 서비스는 새 도메인으로 배포됐지만 사내 DNS 에 등록 누락
 #                    → NXDOMAIN (결제 서비스 로그 'DNS NXDOMAIN', 체크아웃 502)
 #   pg-register      해결: 사내 DNS 에 새 도메인 등록 → 앱 재시작 없이 회복 (corporate 모드: 등록될 때까지 기다림)
@@ -101,11 +101,11 @@ except OSError as e:
 # ── PG 도메인 DNS 시나리오 ────────────────────────────────────
 PG_NETPOL=fw-corpdns-primary-unreachable
 
-corpdns() {   # bastion 모드: 이 호스트의 corpdns-ext 로 사내 DNS 를 조작한다
-  local runner=("$ROOT/corpdns-ext/run.sh" "$@")
-  [[ $EUID -eq 0 ]] || runner=(sudo "${runner[@]}")
-  "${runner[@]}"
-}
+# 사내 DNS 조작 (cluster: ns1/ns2-corp-dns 파드, bastion: bastion 컨테이너) — scripts/corpdns.sh
+corpdns() { "$ROOT/scripts/corpdns.sh" "$@"; }
+
+# 레코드 삭제·등록과 주 DNS 멈춤을 실제로 할 수 있는 모드인가 (corporate 는 실제 사내 DNS 라 건드리지 않음)
+managed_dns() { [[ "$CORP_DNS_MODE" != corporate ]]; }
 
 set_pg_domain() {
   info "결제 서비스 PG_DOMAIN=$1 (재시작)"
@@ -139,18 +139,15 @@ spec:
 EOF
 }
 
-# 결제 파드에서 도메인을 주·보조 DNS 에 각각 조회해 둘 다 IP 를 돌려주면 0
+# 결제 파드에서 도메인을 주·보조 DNS 에 각각 조회해, 응답하는 서버가 모두 IP 를 돌려주면 0
+# (주 DNS 장애 중이면 그 서버는 건너뛴다. 응답하는 서버가 하나도 없으면 실패)
 pg_resolves_everywhere() {
-  kc -n "$APP_NS" exec deploy/payment-service -- node -e "
-const dns = require('node:dns');
-(async () => {
-  let ok = 0; const servers = process.env.PG_DNS_SERVERS.split(',');
-  for (const s of servers) {
-    const r = new dns.promises.Resolver({ timeout: 2000, tries: 1 }); r.setServers([s]);
-    try { await r.resolve4('$1'); ok++; } catch (_) {}
-  }
-  process.exit(ok === servers.length ? 0 : 1);
-})();" >/dev/null 2>&1
+  local out; out="$(pg_dns_query "$1" 2>/dev/null)" || return 1
+  [[ -n "$out" ]] && printf '%s\n' "$out" | awk '
+    $3 ~ /^(TIMEOUT|CONNREFUSED)/ { next }
+    { answered = 1 }
+    $3 !~ /^[0-9.,]+$/ { bad = 1 }
+    END { exit (bad || !answered) }'
 }
 
 current_pg_domain() {
@@ -161,7 +158,7 @@ current_pg_domain() {
 pg_register() {
   local d="$PG_UNREGISTERED_DOMAIN" waited=0 limit="${PG_REGISTER_WAIT:-600}"
   [[ "$(current_pg_domain)" == "$d" ]] || warn "앱이 아직 ${d} 를 쓰고 있지 않습니다 — 먼저 './demo.sh pg-missing'"
-  if [[ "$CORP_DNS_MODE" == bastion ]]; then
+  if managed_dns; then
     corpdns record-add "$d"
   else
     info "사내 DNS 담당자에게 요청할 내용 (주 ${CORP_DNS_PRIMARY}, 보조 ${CORP_DNS_SECONDARY} 모두):"
@@ -178,19 +175,10 @@ pg_register() {
 }
 
 pg_status() {
-  info "사내 DNS (${CORP_DNS_MODE} 모드) — 결제 서비스 파드에서 서버별로 ${PG_DOMAIN} 조회"
-  kc -n "$APP_NS" exec deploy/payment-service -- node -e "
-const dns = require('node:dns');
-(async () => {
-  const host = process.env.PG_DOMAIN;
-  for (const [i, s] of process.env.PG_DNS_SERVERS.split(',').entries()) {
-    const r = new dns.promises.Resolver({ timeout: 2000, tries: 1 }); r.setServers([s]);
-    const t = Date.now();
-    try { console.log('  ' + (i ? 'secondary' : 'primary  ') + ' ' + s + '  ' + host + ' → ' + (await r.resolve4(host)).join(',') + ' (' + (Date.now() - t) + 'ms)'); }
-    catch (e) { const m = { ENOTFOUND: 'NXDOMAIN', ENODATA: 'NODATA', ESERVFAIL: 'SERVFAIL', EREFUSED: 'REFUSED', ETIMEOUT: 'TIMEOUT' }; console.log('  ' + (i ? 'secondary' : 'primary  ') + ' ' + s + '  ' + host + ' → ' + (m[e.code] || e.code) + ' (' + e.code + ', ' + (Date.now() - t) + 'ms)'); }
-  }
-})();" || warn "payment-service exec 실패"
-  [[ "$CORP_DNS_MODE" == bastion ]] && { info "bastion 사내 DNS 컨테이너"; corpdns status || true; }
+  local host; host="$(current_pg_domain)"; host="${host:-$PG_DOMAIN}"   # pg-missing 뒤에는 새 도메인
+  info "사내 DNS (${CORP_DNS_MODE} 모드) — 결제 서비스 파드에서 서버별로 ${host} 조회"
+  pg_dns_query "$host" | sed "s/^/  /; s/ \([^ ]*\) \([^ ]*ms\)$/  ${host} → \1 (\2)/" || warn "payment-service exec 실패"
+  if managed_dns; then info "사내 DNS (${CORP_DNS_MODE})"; corpdns status || true; fi
   kc -n "$APP_NS" get netpol "$PG_NETPOL" >/dev/null 2>&1 && warn "주 DNS 차단 정책(${PG_NETPOL}) 적용 중"
 
   info "게이트웨이 → 주문 → 결제 → PG 를 거친 체크아웃 1건"
@@ -224,7 +212,7 @@ case "${1:-}" in
     ;;
   pg-missing)
     # PG사가 새 도메인으로 이전 → 앱은 새 도메인으로 배포됐지만 사내 DNS 에 등록이 누락된 상황
-    [[ "$CORP_DNS_MODE" == bastion ]] && corpdns record-remove "$PG_UNREGISTERED_DOMAIN" >/dev/null
+    managed_dns && corpdns record-remove "$PG_UNREGISTERED_DOMAIN" >/dev/null
     set_pg_domain "$PG_UNREGISTERED_DOMAIN"
     ok "사내 DNS 에 ${PG_UNREGISTERED_DOMAIN} 없음 — 체크아웃이 실패합니다 (결제 서비스 로그: DNS NXDOMAIN)"
     ok "해결 장면: './demo.sh pg-register' (사내 DNS 에 등록)"
@@ -234,7 +222,7 @@ case "${1:-}" in
     pg_status
     ;;
   pg-primary-down)
-    if [[ "$CORP_DNS_MODE" == bastion ]]; then
+    if managed_dns; then
       corpdns primary-down
     else
       block_primary_dns
@@ -242,10 +230,10 @@ case "${1:-}" in
     ok "주 DNS 장애 재현 — 체크아웃이 약 2초 느려지고 결제 서비스에 dns fallback 로그가 남습니다"
     ;;
   pg-reset)
-    if [[ "$CORP_DNS_MODE" == bastion ]]; then
+    if managed_dns; then
+      corpdns primary-up
       corpdns record-add "$PG_DOMAIN" >/dev/null
       corpdns record-remove "$PG_UNREGISTERED_DOMAIN" >/dev/null
-      corpdns primary-up
     fi
     kc -n "$APP_NS" delete netpol "$PG_NETPOL" --ignore-not-found >/dev/null
     [[ "$(current_pg_domain)" == "$PG_DOMAIN" ]] || set_pg_domain "$PG_DOMAIN"

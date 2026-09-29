@@ -4,6 +4,7 @@
 //                                                → 외부 PG사 POST https://<PG_DOMAIN>/v1/payments/approve (승인)
 //
 // PG 도메인은 클러스터 DNS 가 아니라 "사내 DNS"(PG_DNS_SERVERS: 주, 보조 순)에 직접 질의한다.
+//   PG_DNS_SERVERS 형식: "IP,IP" 또는 "이름=IP,이름=IP" (이름은 로그에만 쓴다. 예: ns1-corp-dns=172.30.0.10)
 //   - 주 DNS 가 응답하지 않으면(ETIMEOUT·ECONNREFUSED·ESERVFAIL) 보조 DNS 로 넘어가고, 그 과정을 WARN 으로 남긴다
 //   - NXDOMAIN(ENOTFOUND)은 "그런 이름은 없다"는 확정 응답이므로 보조로 넘어가지 않고 바로 실패한다 (OS 리졸버와 같은 동작)
 //   - PG_DNS_SERVERS 가 비어 있으면 OS 리졸버(getaddrinfo)를 쓴다 → 실패 시 'getaddrinfo ENOTFOUND'
@@ -21,7 +22,8 @@ const MEMBER_URL = new URL(process.env.MEMBER_URL || 'http://member-service:8080
 const agent = new http.Agent({ keepAlive: true, maxSockets: 50 });
 
 const PG_DOMAIN = process.env.PG_DOMAIN || 'api.pg.example';
-const PG_DNS_SERVERS = (process.env.PG_DNS_SERVERS || '').split(',').map((v) => v.trim()).filter(Boolean);
+const PG_DNS_SERVERS = (process.env.PG_DNS_SERVERS || '').split(',').map((v) => v.trim()).filter(Boolean)
+  .map((v) => { const [name, ip] = v.includes('=') ? v.split('=') : ['', v]; return { name, ip }; });
 const PG_DNS_TIMEOUT_MS = Number(process.env.PG_DNS_TIMEOUT_MS || 2000);
 const PG_CA_FILE = process.env.PG_CA_FILE || '/etc/demo-ca/ca.crt';
 const PG_CA = fs.existsSync(PG_CA_FILE) ? fs.readFileSync(PG_CA_FILE) : undefined;
@@ -106,8 +108,8 @@ async function resolvePg(host) {
   }
   const attempts = [];
   let lastErr;
-  for (const [i, server] of PG_DNS_SERVERS.entries()) {
-    const who = `${i === 0 ? 'primary' : 'secondary'} ${server}`;
+  for (const [i, { name, ip: server }] of PG_DNS_SERVERS.entries()) {
+    const who = `${i === 0 ? 'primary' : 'secondary'} ${name ? `${name}(${server})` : server}`;
     const resolver = new dns.promises.Resolver({ timeout: PG_DNS_TIMEOUT_MS, tries: 1 });
     resolver.setServers([server]);
     const started = Date.now();

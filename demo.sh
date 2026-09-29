@@ -32,7 +32,8 @@ usage() {
   pg-primary-down  사내 주 DNS 장애 (타임아웃 → 보조 DNS 로 넘어감, 결제 약 2초 지연)
   pg-reset         PG 시나리오 복구
   pg-status        사내 DNS 서버별 응답과 체크아웃 1건
-  corpdns <명령>   bastion 사내 DNS 조작 (up | down | status | logs | records | record-add [도메인] | record-remove [도메인] | primary-down | primary-up)
+  corpdns <명령>   사내 DNS 조작 — cluster: ns1/ns2-corp-dns 파드, bastion: 컨테이너
+                   (status | logs [primary|secondary|all] | records | record-add [도메인] | record-remove [도메인] | primary-down | primary-up | up | down)
 
 [유지보수]
   build            이미지 빌드만 (push 안 함)
@@ -71,7 +72,7 @@ case "$cmd" in
   security)       $S/security-check.sh ;;
   status|incident|fix|reset|baseline|firewall|traffic|pg-missing|pg-register|pg-primary-down|pg-reset|pg-status)
                   $S/scenario.sh "$cmd" ;;
-  corpdns)        ./corpdns-ext/run.sh "$@" ;;
+  corpdns)        $S/corpdns.sh "$@" ;;
   restart)
     source $S/lib.sh; load_env
     for svc in "${SERVICES[@]}"; do kc -n "$APP_NS" rollout restart "deploy/$svc"; done

@@ -7,6 +7,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NS=demo-shop
 INFRA_NS=demo-infra
 FW_LABEL=demo.observ/firewall=egress
+# 사내 DNS 파드 (CORP_DNS_MODE=cluster) — k8s/45-corp-dns.yaml
+CORP_DNS_PRIMARY_NAME=ns1-corp-dns
+CORP_DNS_SECONDARY_NAME=ns2-corp-dns
+CORP_DNS_PRIMARY_ALLOW=allow-corp-dns-primary-from-payment   # 지우면 주 DNS 장애 (primary-down)
 SERVICES=(gateway-service member-service product-service inventory-service order-service payment-service notification-service delivery-service)
 
 # OpenShift 내부 이미지 레지스트리
@@ -28,11 +32,16 @@ load_env() {
   : "${CONTAINER_ENGINE:=auto}" "${REGISTRY_TLS_VERIFY:=false}" "${PLATFORM:=linux/amd64}"
   : "${LOADGEN_ORDER_INTERVAL:=1}" "${LOADGEN_TRACKING_INTERVAL:=1}" "${LOADGEN_REPLICAS:=1}" "${LOADGEN_BROWSE_INTERVAL:=1}"
   [[ "$COURIER_OLD_IP" != "$COURIER_NEW_IP" ]] || die "COURIER_OLD_IP 와 COURIER_NEW_IP 가 같습니다."
-  : "${PG_DOMAIN:=api.pg.example}" "${PG_IP:=}" "${CORP_DNS_MODE:=bastion}" "${PG_UNREGISTERED_DOMAIN:=api-new.pg.example}"
+  : "${PG_DOMAIN:=api.pg.example}" "${PG_IP:=}" "${CORP_DNS_MODE:=cluster}" "${PG_UNREGISTERED_DOMAIN:=api-new.pg.example}"
   : "${CORP_DNS_PRIMARY:=}" "${CORP_DNS_SECONDARY:=}"
   PG_IP="${PG_IP:-$COURIER_OLD_IP}"
-  case "$CORP_DNS_MODE" in bastion|corporate) ;; *) die "CORP_DNS_MODE 는 bastion 또는 corporate 이어야 합니다 (현재: $CORP_DNS_MODE)" ;; esac
-  [[ -n "$CORP_DNS_PRIMARY" && -n "$CORP_DNS_SECONDARY" ]] || die "demo.env 에 CORP_DNS_PRIMARY, CORP_DNS_SECONDARY 를 채우세요 (demo.env.example 참고)."
+  case "$CORP_DNS_MODE" in
+    cluster) ;;
+    bastion|corporate)
+      [[ -n "$CORP_DNS_PRIMARY" && -n "$CORP_DNS_SECONDARY" ]] \
+        || die "CORP_DNS_MODE=${CORP_DNS_MODE} 이면 demo.env 에 CORP_DNS_PRIMARY, CORP_DNS_SECONDARY 를 채우세요 (demo.env.example 참고)." ;;
+    *) die "CORP_DNS_MODE 는 cluster, bastion, corporate 중 하나여야 합니다 (현재: $CORP_DNS_MODE)" ;;
+  esac
   case "$REGISTRY_MODE" in
     ocp-internal) ;;
     external) [[ -n "$REGISTRY" ]] || die "REGISTRY_MODE=external 이면 REGISTRY 를 채워야 합니다." ;;
@@ -41,6 +50,11 @@ load_env() {
   KC="$(detect_cli)"
   if [[ "$REGISTRY_MODE" == ocp-internal && "$KC" != oc ]]; then
     die "REGISTRY_MODE=ocp-internal 은 oc CLI 가 필요합니다 (현재 CLI: $KC)."
+  fi
+  # cluster 모드: 사내 DNS 주소 = demo-infra 의 ns1/ns2-corp-dns 서비스 ClusterIP (배포 전이면 빈 값)
+  if [[ "$CORP_DNS_MODE" == cluster ]]; then
+    CORP_DNS_PRIMARY="$(corp_dns_svc_ip "$CORP_DNS_PRIMARY_NAME")"
+    CORP_DNS_SECONDARY="$(corp_dns_svc_ip "$CORP_DNS_SECONDARY_NAME")"
   fi
 }
 
@@ -156,10 +170,79 @@ render() {
     -e "s#__LOADGEN_BROWSE_INTERVAL__#${LOADGEN_BROWSE_INTERVAL}#g" \
     -e "s#__PG_DOMAIN__#${PG_DOMAIN}#g" \
     -e "s#__CA_SHA256__#$(ca_fingerprint)#g" \
-    -e "s#__PG_DNS_SERVERS__#${CORP_DNS_PRIMARY},${CORP_DNS_SECONDARY}#g" \
+    -e "s#__PG_DNS_SERVERS__#$(pg_dns_servers)#g" \
     "$1"
 }
 
 courier_dns_ip() {
   kc -n "$INFRA_NS" get svc courier-dns -o jsonpath='{.spec.clusterIP}'
+}
+
+# ── 사내 DNS (PG 시나리오) ───────────────────────────────────
+corp_dns_svc_ip() {
+  kc -n "$INFRA_NS" get svc "$1" -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true
+}
+
+# 결제 서비스의 PG_DNS_SERVERS 값 (주, 보조 순). cluster 모드는 로그에 파드 이름이 보이도록 "이름=IP"
+pg_dns_servers() {
+  if [[ "$CORP_DNS_MODE" == cluster ]]; then
+    echo "${CORP_DNS_PRIMARY_NAME}=${CORP_DNS_PRIMARY},${CORP_DNS_SECONDARY_NAME}=${CORP_DNS_SECONDARY}"
+  else
+    echo "${CORP_DNS_PRIMARY},${CORP_DNS_SECONDARY}"
+  fi
+}
+
+# corp_zone : 표준입력의 "도메인 IP" 줄로 존 파일을 만든다.
+# 루트(.) 존을 권한 있게 맡으므로 목록에 없는 이름은 NXDOMAIN. 시리얼이 바뀌어야 CoreDNS 가 다시 읽는다
+corp_zone() {
+  echo '$ORIGIN .'
+  echo '$TTL 5'
+  echo ". IN SOA ns1.corp.example. admin.corp.example. ( $(date +%s) 60 60 600 5 )"
+  echo ". IN NS ns1.corp.example."
+  echo ". IN NS ns2.corp.example."
+  [[ -n "$CORP_DNS_PRIMARY" ]] && echo "ns1.corp.example. IN A ${CORP_DNS_PRIMARY}"
+  [[ -n "$CORP_DNS_SECONDARY" ]] && echo "ns2.corp.example. IN A ${CORP_DNS_SECONDARY}"
+  local name ip
+  while read -r name ip; do
+    [[ -n "$name" ]] && echo "${name}. IN A ${ip}"
+  done
+  return 0
+}
+
+corp_records() {
+  local r; r="$(kc -n "$INFRA_NS" get configmap corp-dns-zone -o jsonpath='{.data.records}' 2>/dev/null || true)"
+  [[ -n "$r" ]] && printf '%s\n' "$r"
+  return 0
+}
+
+# corp_zone_apply <레코드 목록> : corp-dns-zone ConfigMap 갱신 (records = 원본 목록, db.corp = 존 파일)
+corp_zone_apply() {
+  local records="$1"
+  kc -n "$INFRA_NS" create configmap corp-dns-zone \
+    --from-literal=records="$records" \
+    --from-literal=db.corp="$(printf '%s\n' "$records" | corp_zone)" \
+    --dry-run=client -o yaml | kc apply -f - >/dev/null
+  # ConfigMap 볼륨 전파(최대 ~1분)를 기다리지 않도록 파드를 건드려 kubelet 이 바로 다시 마운트하게 한다
+  kc -n "$INFRA_NS" annotate pod -l app=corp-dns --overwrite "demo.observ/zone-sync=$(date +%s)" >/dev/null 2>&1 || true
+}
+
+# pg_dns_query <도메인> : 결제 파드에서 사내 DNS 서버마다 조회한다 (결제 서비스와 같은 리졸버·타임아웃 2초)
+#   출력: "<primary|secondary> <서버> <결과> <ms>" 한 줄씩. 결과는 IP 또는 NXDOMAIN(ENOTFOUND)·TIMEOUT(ETIMEOUT) 등
+pg_dns_query() {
+  kc -n "$APP_NS" exec deploy/payment-service -- node -e '
+const dns = require("node:dns");
+const codes = { ENOTFOUND: "NXDOMAIN", ENODATA: "NODATA", ESERVFAIL: "SERVFAIL", EREFUSED: "REFUSED", ETIMEOUT: "TIMEOUT", ECONNREFUSED: "CONNREFUSED" };
+(async () => {
+  const host = process.argv[1];
+  const servers = (process.env.PG_DNS_SERVERS || "").split(",").filter(Boolean);
+  for (const [i, entry] of servers.entries()) {
+    const [name, ip] = entry.includes("=") ? entry.split("=") : ["", entry];
+    const r = new dns.promises.Resolver({ timeout: 2000, tries: 1 });
+    r.setServers([ip]);
+    const t = Date.now();
+    let res;
+    try { res = (await r.resolve4(host)).join(","); } catch (e) { res = (codes[e.code] || e.code) + "(" + e.code + ")"; }
+    console.log([i ? "secondary" : "primary  ", name ? name + "(" + ip + ")" : ip, res, (Date.now() - t) + "ms"].join(" "));
+  }
+})();' "$1"
 }

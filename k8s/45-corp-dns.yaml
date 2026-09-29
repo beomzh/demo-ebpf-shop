@@ -1,0 +1,182 @@
+# 사내 DNS (CORP_DNS_MODE=cluster) — 주 DNS ns1-corp-dns, 보조 DNS ns2-corp-dns
+#   - 결제 서비스가 PG 도메인을 이 두 서버에 주 → 보조 순서로 직접 질의한다 (클러스터 DNS 를 거치지 않음)
+#   - 두 서버는 같은 존(corp-dns-zone ConfigMap)을 읽는다 = 주 → 보조 존 복제가 끝난 상태
+#   - 루트(.) 존을 권한 있게 맡으므로 등록되지 않은 이름에는 NXDOMAIN 을 답한다
+#   - demo-infra 는 인바운드 기본 차단(55-network-isolation.yaml)이라, 결제 서비스 → 주·보조 DNS 허용 정책을 서버별로 둔다
+#   - 주 DNS 장애는 파드를 죽이지 않고 주 DNS 허용 정책(allow-corp-dns-primary-from-payment)을 지워서 만든다
+#     → 기본 차단 정책이 질의를 버림 (응답 없음 = 타임아웃). primary-up 은 이 파일을 다시 적용해 정책을 되살린다
+#   - 로그에 질의마다 서버 이름이 찍힌다 → 주 → 보조로 넘어가는 순간을 파드 로그로 확인
+# 존 ConfigMap(corp-dns-zone)은 레코드를 바꿀 수 있도록 매니페스트가 아니라 스크립트(scripts/corpdns.sh)가 만든다.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: corp-dns-corefile
+  namespace: demo-infra
+data:
+  Corefile.primary: |
+    .:1053 {
+        file /etc/coredns/zone/db.corp . {
+            reload 2s
+        }
+        log . "{remote} → ns1-corp-dns(primary) {type} {name} {rcode} {duration}"
+        errors
+    }
+  Corefile.secondary: |
+    .:1053 {
+        file /etc/coredns/zone/db.corp . {
+            reload 2s
+        }
+        log . "{remote} → ns2-corp-dns(secondary) {type} {name} {rcode} {duration}"
+        errors
+    }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ns1-corp-dns
+  namespace: demo-infra
+  labels: { app: corp-dns, dns-role: primary }
+spec:
+  serviceName: ns1-corp-dns
+  replicas: 1
+  selector:
+    matchLabels: { app: corp-dns, dns-role: primary }
+  template:
+    metadata:
+      labels: { app: corp-dns, dns-role: primary }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        __NONOCP_RUN_AS_USER__
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: coredns
+          image: registry.k8s.io/coredns/coredns:v1.11.3
+          args: ["-conf", "/etc/coredns/Corefile.primary"]
+          ports:
+            - { name: dns-udp, containerPort: 1053, protocol: UDP }
+            - { name: dns-tcp, containerPort: 1053, protocol: TCP }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            # coredns 바이너리의 파일 capability 때문에 NET_BIND_SERVICE 를 남긴다 (40-courier-dns.yaml 참고)
+            capabilities: { drop: ["ALL"], add: ["NET_BIND_SERVICE"] }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          volumeMounts:
+            - { name: corefile, mountPath: /etc/coredns, readOnly: true }
+            - { name: zone, mountPath: /etc/coredns/zone, readOnly: true }
+      volumes:
+        - name: corefile
+          configMap: { name: corp-dns-corefile }
+        - name: zone
+          configMap: { name: corp-dns-zone }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ns2-corp-dns
+  namespace: demo-infra
+  labels: { app: corp-dns, dns-role: secondary }
+spec:
+  serviceName: ns2-corp-dns
+  replicas: 1
+  selector:
+    matchLabels: { app: corp-dns, dns-role: secondary }
+  template:
+    metadata:
+      labels: { app: corp-dns, dns-role: secondary }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        __NONOCP_RUN_AS_USER__
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: coredns
+          image: registry.k8s.io/coredns/coredns:v1.11.3
+          args: ["-conf", "/etc/coredns/Corefile.secondary"]
+          ports:
+            - { name: dns-udp, containerPort: 1053, protocol: UDP }
+            - { name: dns-tcp, containerPort: 1053, protocol: TCP }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"], add: ["NET_BIND_SERVICE"] }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          volumeMounts:
+            - { name: corefile, mountPath: /etc/coredns, readOnly: true }
+            - { name: zone, mountPath: /etc/coredns/zone, readOnly: true }
+      volumes:
+        - name: corefile
+          configMap: { name: corp-dns-corefile }
+        - name: zone
+          configMap: { name: corp-dns-zone }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ns1-corp-dns
+  namespace: demo-infra
+  labels: { app: corp-dns, dns-role: primary }
+spec:
+  selector: { app: corp-dns, dns-role: primary }
+  ports:
+    - { name: dns-udp, port: 53, targetPort: 1053, protocol: UDP }
+    - { name: dns-tcp, port: 53, targetPort: 1053, protocol: TCP }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ns2-corp-dns
+  namespace: demo-infra
+  labels: { app: corp-dns, dns-role: secondary }
+spec:
+  selector: { app: corp-dns, dns-role: secondary }
+  ports:
+    - { name: dns-udp, port: 53, targetPort: 1053, protocol: UDP }
+    - { name: dns-tcp, port: 53, targetPort: 1053, protocol: TCP }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-corp-dns-primary-from-payment
+  namespace: demo-infra
+  labels: { demo.observ/policy: isolation, demo.observ/scenario: pg-dns }
+spec:
+  podSelector:
+    matchLabels: { app: corp-dns, dns-role: primary }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: demo-shop }
+          podSelector:
+            matchLabels: { app: payment-service }
+      ports:
+        - { protocol: UDP, port: 1053 }
+        - { protocol: TCP, port: 1053 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-corp-dns-secondary-from-payment
+  namespace: demo-infra
+  labels: { demo.observ/policy: isolation, demo.observ/scenario: pg-dns }
+spec:
+  podSelector:
+    matchLabels: { app: corp-dns, dns-role: secondary }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: demo-shop }
+          podSelector:
+            matchLabels: { app: payment-service }
+      ports:
+        - { protocol: UDP, port: 1053 }
+        - { protocol: TCP, port: 1053 }

@@ -111,7 +111,25 @@ for ip in "$COURIER_OLD_IP" "$COURIER_NEW_IP"; do
 done
 
 info "5) 사내 DNS (${CORP_DNS_MODE} 모드) 와 외부 PG — 클러스터 안(임시 파드)에서"
-for dns_ip in "$CORP_DNS_PRIMARY" "$CORP_DNS_SECONDARY"; do
+dns_ips=("$CORP_DNS_PRIMARY" "$CORP_DNS_SECONDARY")
+if [[ "$CORP_DNS_MODE" == cluster ]]; then
+  # 사내 DNS 파드는 결제 서비스만 들어올 수 있으므로(demo-infra 인바운드 기본 차단) 결제 파드에서 조회한다
+  dns_ips=()
+  if [[ -z "$CORP_DNS_PRIMARY" ]] || ! kc -n "$APP_NS" get deploy payment-service >/dev/null 2>&1; then
+    info "  cluster 모드: 사내 DNS 파드(${CORP_DNS_PRIMARY_NAME}, ${CORP_DNS_SECONDARY_NAME})는 deploy 때 만들어집니다 (조회 점검은 배포 후 다시 check)"
+  else
+    while read -r role server result _; do
+      if [[ "$result" == *"$PG_IP"* ]]; then
+        ok "  [결제 → 사내 DNS ${role} ${server}] ${PG_DOMAIN} → ${result} OK"
+      else
+        warn "  [결제 → 사내 DNS ${role} ${server}] ${PG_DOMAIN} 조회 실패: ${result}"
+        warn "      → './demo.sh corpdns status' 로 파드·레코드·주 DNS 차단 여부 확인 ('./demo.sh pg-reset' 으로 복구)"
+        fail=1
+      fi
+    done < <(pg_dns_query "$PG_DOMAIN" 2>&1 || echo "? payment-service exec-실패 -")
+  fi
+fi
+for dns_ip in ${dns_ips[@]+"${dns_ips[@]}"}; do
   out="$(probe corpdns-probe docker.io/library/busybox:1.36 \
          nslookup -type=a -timeout=2 "$PG_DOMAIN" "$dns_ip" 2>&1 || true)"
   if printf '%s' "$out" | grep -q "Address: ${PG_IP}\b"; then
