@@ -7,10 +7,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NS=demo-shop
 INFRA_NS=demo-infra
 FW_LABEL=demo.observ/firewall=egress
-# 사내 DNS 파드 (CORP_DNS_MODE=cluster) — k8s/45-corp-dns.yaml
+# 사내 DNS 파드 — k8s/45-corp-dns.yaml
 CORP_DNS_PRIMARY_NAME=ns1-corp-dns
 CORP_DNS_SECONDARY_NAME=ns2-corp-dns
-CORP_DNS_PRIMARY_ALLOW=allow-corp-dns-primary-from-payment   # 지우면 주 DNS 장애 (primary-down)
 SERVICES=(gateway-service member-service product-service inventory-service order-service payment-service notification-service delivery-service)
 
 # OpenShift 내부 이미지 레지스트리
@@ -32,16 +31,11 @@ load_env() {
   : "${CONTAINER_ENGINE:=auto}" "${REGISTRY_TLS_VERIFY:=false}" "${PLATFORM:=linux/amd64}"
   : "${LOADGEN_ORDER_INTERVAL:=1}" "${LOADGEN_TRACKING_INTERVAL:=1}" "${LOADGEN_REPLICAS:=1}" "${LOADGEN_BROWSE_INTERVAL:=1}"
   [[ "$COURIER_OLD_IP" != "$COURIER_NEW_IP" ]] || die "COURIER_OLD_IP 와 COURIER_NEW_IP 가 같습니다."
-  : "${PG_DOMAIN:=api.pg.example}" "${PG_IP:=}" "${CORP_DNS_MODE:=cluster}" "${PG_UNREGISTERED_DOMAIN:=api-new.pg.example}"
-  : "${CORP_DNS_PRIMARY:=}" "${CORP_DNS_SECONDARY:=}"
+  : "${PG_DOMAIN:=api.pg.example}" "${PG_IP:=}" "${PG_UNREGISTERED_DOMAIN:=api-new.pg.example}"
   PG_IP="${PG_IP:-$COURIER_OLD_IP}"
-  case "$CORP_DNS_MODE" in
-    cluster) ;;
-    bastion|corporate)
-      [[ -n "$CORP_DNS_PRIMARY" && -n "$CORP_DNS_SECONDARY" ]] \
-        || die "CORP_DNS_MODE=${CORP_DNS_MODE} 이면 demo.env 에 CORP_DNS_PRIMARY, CORP_DNS_SECONDARY 를 채우세요 (demo.env.example 참고)." ;;
-    *) die "CORP_DNS_MODE 는 cluster, bastion, corporate 중 하나여야 합니다 (현재: $CORP_DNS_MODE)" ;;
-  esac
+  if [[ -n "${CORP_DNS_MODE:-}" && "${CORP_DNS_MODE}" != cluster ]]; then
+    warn "CORP_DNS_MODE=${CORP_DNS_MODE} 는 더 이상 쓰지 않습니다. 사내 DNS 는 항상 demo-infra 의 파드(ns1/ns2-corp-dns)입니다 (demo.env 에서 지워도 됨)."
+  fi
   case "$REGISTRY_MODE" in
     ocp-internal) ;;
     external) [[ -n "$REGISTRY" ]] || die "REGISTRY_MODE=external 이면 REGISTRY 를 채워야 합니다." ;;
@@ -51,11 +45,9 @@ load_env() {
   if [[ "$REGISTRY_MODE" == ocp-internal && "$KC" != oc ]]; then
     die "REGISTRY_MODE=ocp-internal 은 oc CLI 가 필요합니다 (현재 CLI: $KC)."
   fi
-  # cluster 모드: 사내 DNS 주소 = demo-infra 의 ns1/ns2-corp-dns 서비스 ClusterIP (배포 전이면 빈 값)
-  if [[ "$CORP_DNS_MODE" == cluster ]]; then
-    CORP_DNS_PRIMARY="$(corp_dns_svc_ip "$CORP_DNS_PRIMARY_NAME")"
-    CORP_DNS_SECONDARY="$(corp_dns_svc_ip "$CORP_DNS_SECONDARY_NAME")"
-  fi
+  # 사내 DNS 주소 = demo-infra 의 ns1/ns2-corp-dns 서비스 ClusterIP (배포 전이면 빈 값)
+  CORP_DNS_PRIMARY="$(corp_dns_svc_ip "$CORP_DNS_PRIMARY_NAME")"
+  CORP_DNS_SECONDARY="$(corp_dns_svc_ip "$CORP_DNS_SECONDARY_NAME")"
 }
 
 # ── 클러스터 CLI ─────────────────────────────────────────────
@@ -165,42 +157,19 @@ render() {
     -e "s#__COURIER_OLD_IP__#${COURIER_OLD_IP}#g" \
     -e "s#__CORP_DNS_PRIMARY__#${CORP_DNS_PRIMARY}#g" \
     -e "s#__CORP_DNS_SECONDARY__#${CORP_DNS_SECONDARY}#g" \
-    -e "s#__CORP_DNS_PEERS__#$(corp_dns_peers)#g" \
-    -e "s#__CORP_DNS_PORT__#$(corp_dns_port)#g" \
     -e "s#__LOADGEN_ORDER_INTERVAL__#${LOADGEN_ORDER_INTERVAL}#g" \
     -e "s#__LOADGEN_TRACKING_INTERVAL__#${LOADGEN_TRACKING_INTERVAL}#g" \
     -e "s#__LOADGEN_REPLICAS__#${LOADGEN_REPLICAS}#g" \
     -e "s#__LOADGEN_BROWSE_INTERVAL__#${LOADGEN_BROWSE_INTERVAL}#g" \
     -e "s#__PG_DOMAIN__#${PG_DOMAIN}#g" \
     -e "s#__CA_SHA256__#$(ca_fingerprint)#g" \
-    -e "s#__PG_DNS_SERVERS__#$(pg_dns_servers)#g" \
     "$1"
 }
 
-# 배송 서비스 방화벽(50-firewall.yaml)의 사내 DNS 허용 대상 — 한 줄짜리 YAML 목록
-#   cluster: 사내 DNS 파드 (NetworkPolicy 는 DNAT 뒤의 파드 IP·포트로 판단하므로 ClusterIP 가 아니라 파드를 지정)
-#   bastion·corporate: 사내 DNS IP 2개
-corp_dns_peers() {
-  if [[ "$CORP_DNS_MODE" == cluster ]]; then
-    echo "[{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ${INFRA_NS} } }, podSelector: { matchLabels: { app: corp-dns } } }]"
-  else
-    echo "[{ ipBlock: { cidr: ${CORP_DNS_PRIMARY}/32 } }, { ipBlock: { cidr: ${CORP_DNS_SECONDARY}/32 } }]"
-  fi
-}
-corp_dns_port() { [[ "$CORP_DNS_MODE" == cluster ]] && echo 1053 || echo 53; }
 
 # ── 사내 DNS (PG 시나리오) ───────────────────────────────────
 corp_dns_svc_ip() {
   kc -n "$INFRA_NS" get svc "$1" -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true
-}
-
-# 결제 서비스의 PG_DNS_SERVERS 값 (주, 보조 순). cluster 모드는 로그에 파드 이름이 보이도록 "이름=IP"
-pg_dns_servers() {
-  if [[ "$CORP_DNS_MODE" == cluster ]]; then
-    echo "${CORP_DNS_PRIMARY_NAME}=${CORP_DNS_PRIMARY},${CORP_DNS_SECONDARY_NAME}=${CORP_DNS_SECONDARY}"
-  else
-    echo "${CORP_DNS_PRIMARY},${CORP_DNS_SECONDARY}"
-  fi
 }
 
 # corp_zone : 표준입력의 "도메인 IP" 줄로 존 파일을 만든다.
@@ -237,23 +206,22 @@ corp_zone_apply() {
   kc -n "$INFRA_NS" annotate pod -l app=corp-dns --overwrite "demo.observ/zone-sync=$(date +%s)" >/dev/null 2>&1 || true
 }
 
-# pg_dns_query <도메인> : 결제 파드에서 사내 DNS 서버마다 조회한다 (결제 서비스와 같은 리졸버·타임아웃 2초)
-#   출력: "<primary|secondary> <서버> <결과> <ms>" 한 줄씩. 결과는 IP 또는 NXDOMAIN(ENOTFOUND)·TIMEOUT(ETIMEOUT) 등
-pg_dns_query() {
+# dns_query <도메인> : 결제 파드에서 사내 DNS 서버마다 따로 조회한다 (점검용 — 앱은 OS 리졸버를 씀. 타임아웃 2초)
+#   출력: "<primary|secondary> <서버> <결과> <ms>" 한 줄씩. 결과는 IP 또는 NXDOMAIN(ENOTFOUND)·TIMEOUT(ETIMEOUT)·CONNREFUSED 등
+dns_query() {
   kc -n "$APP_NS" exec deploy/payment-service -- node -e '
 const dns = require("node:dns");
 const codes = { ENOTFOUND: "NXDOMAIN", ENODATA: "NODATA", ESERVFAIL: "SERVFAIL", EREFUSED: "REFUSED", ETIMEOUT: "TIMEOUT", ECONNREFUSED: "CONNREFUSED" };
 (async () => {
-  const host = process.argv[1];
-  const servers = (process.env.PG_DNS_SERVERS || "").split(",").filter(Boolean);
+  const [host, ...servers] = process.argv.slice(1);
   for (const [i, entry] of servers.entries()) {
-    const [name, ip] = entry.includes("=") ? entry.split("=") : ["", entry];
+    const [name, ip] = entry.split("=");
     const r = new dns.promises.Resolver({ timeout: 2000, tries: 1 });
     r.setServers([ip]);
     const t = Date.now();
     let res;
     try { res = (await r.resolve4(host)).join(","); } catch (e) { res = (codes[e.code] || e.code) + "(" + e.code + ")"; }
-    console.log([i ? "secondary" : "primary  ", name ? name + "(" + ip + ")" : ip, res, (Date.now() - t) + "ms"].join(" "));
+    console.log([i ? "secondary" : "primary  ", name + "(" + ip + ")", res, (Date.now() - t) + "ms"].join(" "));
   }
-})();' "$1"
+})();' "$1" "${CORP_DNS_PRIMARY_NAME}=${CORP_DNS_PRIMARY}" "${CORP_DNS_SECONDARY_NAME}=${CORP_DNS_SECONDARY}"
 }

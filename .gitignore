@@ -8,4 +8,3 @@ __pycache__/
 .idea/
 .vscode/
 courier-ext/.nginx.rendered.conf
-corpdns-ext/.rendered/

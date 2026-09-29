@@ -2,8 +2,8 @@
 # 택배사 도메인은 사내 DNS(주·보조)에 등록된 A 레코드 "IP 1개"로 조회한다 (dnsPolicy: None).
 #   - 배송 서비스가 쓰는 DNS 는 사내 DNS 뿐이다 (택배사 외에는 이름 조회를 하지 않음. 방화벽도 DNS·택배사만 허용)
 #   - ndots:1 + search 없음 → api.courier.example 을 바로 조회해 NXDOMAIN 이 0 으로 유지된다.
-#   - timeout:2 attempts:1 → 주 DNS 가 응답하지 않으면 2초 뒤 보조 DNS 로 (결제 서비스와 같은 기준)
-#   - __CORP_DNS_PRIMARY__/SECONDARY 는 scripts/deploy.sh 가 채운다 (cluster 모드: ns1/ns2-corp-dns 의 ClusterIP)
+#   - 주 DNS 가 없으면 OS 리졸버가 보조 DNS 로 넘어간다 (timeout 2초, attempts 1 — 결제 서비스와 같은 기준)
+#   - __CORP_DNS_PRIMARY__/SECONDARY 는 scripts/deploy.sh 가 ns1/ns2-corp-dns 서비스의 ClusterIP 로 채운다
 # 택배사 TLS 인증서는 courier-ca 시크릿의 사설 CA 로 검증한다 (시크릿이 없으면 기동하지 않음).
 apiVersion: apps/v1
 kind: Deployment

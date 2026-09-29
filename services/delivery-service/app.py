@@ -39,26 +39,6 @@ log = logging.getLogger("delivery")
 
 TRACKING_PATH = re.compile(r"^/deliveries/(\d+)/tracking$")
 
-# DNS 조회 실패(getaddrinfo 에러 코드) → DNS 응답 이름과 뜻. 로그에 "도메인을 못 찾았다(NXDOMAIN)"를 분명히 남긴다
-DNS_RESULT = {
-    socket.EAI_NONAME: ("NXDOMAIN", "사내 DNS 에 이 도메인 레코드가 없음"),
-    socket.EAI_AGAIN: ("TIMEOUT/SERVFAIL", "사내 DNS 가 응답하지 않거나 일시적으로 실패함"),
-}
-if hasattr(socket, "EAI_NODATA"):
-    DNS_RESULT[socket.EAI_NODATA] = ("NODATA", "도메인은 있지만 A 레코드가 없음")
-
-
-def dns_servers() -> str:
-    """이 파드가 질의하는 DNS 서버 (/etc/resolv.conf 의 nameserver, 주 → 보조 순)."""
-    try:
-        with open("/etc/resolv.conf") as f:
-            return ",".join(line.split()[1] for line in f if line.startswith("nameserver"))
-    except OSError:
-        return "-"
-
-
-DNS_SERVERS = dns_servers()
-
 
 def build_ssl_context() -> ssl.SSLContext:
     # 기본은 fail-closed: CA 파일이 없으면 기동하지 않는다.
@@ -87,11 +67,6 @@ class CourierError(Exception):
         super().__init__(f"{stage} failed ip={ip}: {cause!r}")
         self.stage = stage
         self.ip = ip
-        # DNS 단계 실패면 (NXDOMAIN, 뜻) — 아니면 None
-        self.dns = None
-        if stage == "dns":
-            code = getattr(cause, "errno", None)
-            self.dns = DNS_RESULT.get(code, (f"EAI_{code}", str(cause)))
 
 
 def tracking_no_for(order_id: str) -> str:
@@ -161,13 +136,7 @@ class Handler(BaseHTTPRequestHandler):
             data = call_courier(tracking_no)
         except CourierError as e:
             elapsed = time.monotonic() - started
-            if e.dns:
-                # 예: DNS NXDOMAIN: api.courier.example ([Errno -2] Name or service not known)
-                reason = f"DNS {e.dns[0]}: {COURIER_HOST} ({e.__cause__}) after {elapsed:.2f}s"
-                log.error('dns lookup failed req=%s host=%s result=%s servers="%s" — %s',
-                          req_id, COURIER_HOST, e.dns[0], DNS_SERVERS, e.dns[1])
-            else:
-                reason = f"{e.stage}: {e.__cause__ or e} after {elapsed:.2f}s"
+            reason = f"{e.stage}: {e.__cause__ or e} after {elapsed:.2f}s"
             target = f"{COURIER_HOST}({e.ip}:{COURIER_PORT})"
             # 실패 경로: 이 서비스 → 어디를 호출하다 [무엇 때문에] 실패했는지. 위 서비스들이 앞에 자기 구간을 붙인다
             error_path = f"{SERVICE} → {target} [{reason}]"

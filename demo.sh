@@ -17,27 +17,28 @@ usage() {
   deploy           클러스터에 배포 (정상 상태로 시작)
   security         배포 후 보안 점검 (SCC·securityContext·네트워크 정책)
 
-[촬영]
-  status           현재 상태 요약 (DNS 응답·연결 가능 여부·방화벽 규칙·배송 조회 1건)
-  incident         사건 발생: 택배사가 IP 를 새 IP 로 변경
-  firewall         방화벽 규칙 목록 (데모 3)
-  fix              해결: 방화벽에 새 IP 허용 (데모 4)
-  reset            다음 테이크 준비 (새 IP 규칙 삭제, DNS → 예전 IP)
-  baseline         reset 과 같음
+[시나리오 ① 방화벽 차단 — 배송 서비스 → 외부 택배사]
+  status           현재 상태 (사내 DNS 의 택배사 레코드·연결 가능 여부·방화벽 규칙·배송 조회 1건)
+  incident         사건: 택배사가 IP 변경 (사내 DNS 택배사 레코드 → 새 IP, 방화벽은 예전 IP 만 허용)
+  firewall         방화벽 규칙 목록 (원인 확인)
+  fix              해결: 방화벽에 새 IP 허용
+  reset            다음 테이크 준비 (새 IP 규칙 삭제, 택배사 레코드 → 예전 IP). baseline 과 같음
   traffic          부하 발생기 로그 실시간 보기 (Ctrl+C 로 종료)
 
-[변형 — 택배사 도메인을 못 찾음 (타임아웃 대신 DNS NXDOMAIN)]
-  courier-missing  사내 DNS 에서 택배사 도메인 레코드 삭제 → 배송 조회 즉시 502 (배송 서비스 로그: result=NXDOMAIN)
-  courier-register 해결: 택배사 레코드 다시 등록 → 재시작 없이 회복
+[시나리오 ② DNS 이름 변경 → 없는 이름 조회 — 결제 서비스 → 외부 PG사]
+  pg-missing       PG 새 도메인으로 교체했지만 사내 DNS 에 없음 → 체크아웃 실패 (getaddrinfo ENOTFOUND)
+  pg-register      해결: 사내 DNS 에 새 도메인 등록 → 재시작 없이 회복
+  pg-reset         원래 도메인으로 (다음 테이크 준비)
+  pg-status        사내 DNS 서버별 조회 + 체크아웃 1건
 
-[추가 시나리오 — 외부 PG사 도메인 DNS 장애]
-  pg-missing       PG 새 도메인이 사내 DNS 에 없음 → 결제 실패 (결제 서비스 로그: DNS NXDOMAIN)
-  pg-register      해결: 사내 DNS 에 새 도메인 등록 → 재시작 없이 회복 (corporate: 등록될 때까지 대기)
-  pg-primary-down  사내 주 DNS 장애 (타임아웃 → 보조 DNS 로 넘어감, 결제 약 2초 지연)
-  pg-reset         PG 시나리오 복구
-  pg-status        사내 DNS 서버별 응답과 체크아웃 1건
-  corpdns <명령>   사내 DNS 조작 — cluster: ns1/ns2-corp-dns 파드, bastion: 컨테이너
-                   (status | logs [primary|secondary|all] | records | record-add [도메인] | record-remove [도메인] | primary-down | primary-up | up | down)
+[시나리오 ③ 주 DNS 장애 — 주 DNS 파드 삭제, 보조 DNS 로 정상 동작]
+  dns-primary-down 주 DNS 파드(ns1-corp-dns-0) 삭제 → 보조 DNS(ns2) 가 응답, 서비스 정상
+  dns-primary-up   주 DNS 파드 다시 기동
+  dns-status       사내 DNS 파드·서버별 조회 + 체크아웃 1건 + 배송 조회 1건
+
+[사내 DNS]
+  corpdns <명령>   status | logs [primary|secondary|all] | records | record-add [도메인] [IP] | record-remove [도메인]
+                   | primary-down | primary-up | up | down
 
 [유지보수]
   build            이미지 빌드만 (push 안 함)
@@ -74,7 +75,7 @@ case "$cmd" in
   push)           $S/build-images.sh --push ;;
   deploy)         $S/deploy.sh ;;
   security)       $S/security-check.sh ;;
-  status|incident|fix|reset|baseline|firewall|traffic|courier-missing|courier-register|pg-missing|pg-register|pg-primary-down|pg-reset|pg-status)
+  status|incident|fix|reset|baseline|firewall|traffic|pg-missing|pg-register|pg-reset|pg-status|dns-primary-down|dns-primary-up|dns-status)
                   $S/scenario.sh "$cmd" ;;
   corpdns)        $S/corpdns.sh "$@" ;;
   restart)

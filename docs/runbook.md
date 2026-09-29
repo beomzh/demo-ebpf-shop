@@ -84,34 +84,32 @@ fw-delivery-default             배송 서비스 egress 기본 규칙: 사내 DN
 
 ---
 
-## 변형 — 택배사 도메인을 못 찾음 (NXDOMAIN, 선택)
+## 시나리오 2 — DNS 이름 변경 → 없는 이름 조회 (결제 서비스)
 
-방화벽 타임아웃 대신 **DNS 에러**로 같은 배송 조회 실패를 보여줄 때. 자세한 로그 예시는 [README 6-3](../README.md#6-3-변형--택배사-도메인을-못-찾음-nxdomain).
-
-| 순서 | 명령 / 화면 | 보여줄 것 | 멘트 요지 |
-| --- | --- | --- | --- |
-| 1 | `./demo.sh courier-missing` | 배송 조회 502 **즉시** | 사내 DNS 에서 택배사 레코드가 빠졌다 |
-| 2 | 배송 서비스 상세 → DNS 탭 | `api.courier.example` 조회의 **NXDOMAIN 증가**, 택배사로 가는 TCP 연결 없음 | 연결 문제가 아니라 이름을 못 찾는 문제 |
-| 3 | (터미널) `oc -n demo-shop logs deploy/delivery-service --since=1m \| grep "dns lookup failed" \| tail -1` | `result=NXDOMAIN … — 사내 DNS 에 이 도메인 레코드가 없음` | 앱 로그도 같은 원인을 가리킨다 |
-| 4 | `./demo.sh courier-register` | NXDOMAIN 멈춤, 배송 조회 200 | 레코드 한 줄 등록으로 재시작 없이 회복 |
-
-## 추가 시나리오 — 외부 PG 도메인 DNS 장애 (선택)
-
-택배사 사건과 별개로 촬영합니다. 무대 구성(외부 PG사 nginx, 사내 DNS 주·보조 — 기본은 `demo-infra` 파드 `ns1-corp-dns-0`·`ns2-corp-dns-0`)과 로그 예시는 [README 6-2](../README.md#6-2-추가-시나리오--외부-pg-도메인-dns-장애).
+택배사 사건과 별개로 촬영합니다. 로그 예시는 [README 6-2](../README.md#6-2-시나리오-2--dns-이름-변경-없는-이름-조회).
 장애는 **결제 서비스(Node.js)** 에서만 납니다 — 외부 PG 를 부르는 유일한 서비스입니다.
 
 | 순서 | 명령 | 화면 | 보여줄 것 | 말할 것 |
 | --- | --- | --- | --- | --- |
-| 0 | `./demo.sh pg-status` | | 주·보조 DNS 모두 PG IP, 체크아웃 201 | 결제 서비스는 PG 도메인을 사내 DNS(주·보조)에 물어 외부 PG사에 승인을 요청한다 |
+| 0 | `./demo.sh pg-status` | | 주·보조 DNS 모두 PG IP, 체크아웃 201 | 결제 서비스는 사내 DNS 로 PG 도메인을 찾아 승인을 요청한다 |
 | 1 | `./demo.sh pg-missing` | 결제 서비스 상세 → DNS 탭, 체크아웃 오류율 | 새 PG 도메인(`api-new…`) 조회의 **NXDOMAIN** 증가 | PG사 도메인 이전 후 결제가 전부 실패 — 코드가 아니라 사내 DNS 등록 누락 |
-| 2 | (터미널) `kubectl -n demo-shop logs deploy/payment-service --since=1m \| grep "dns lookup failed" \| tail -1` | 결제 서비스 로그 | `result=NXDOMAIN server="primary …" — 사내 DNS 에 이 도메인 레코드가 없음` | eBPF 가 먼저 보여준 원인을 앱 로그가 뒷받침한다 |
-| 3 | `./demo.sh pg-register` (corporate: 주 DNS 에 레코드 추가) | DNS 탭, 체크아웃 | NXDOMAIN 멈춤, 체크아웃 201 | 사내 DNS 에 한 줄 등록하자 **앱 재시작 없이** 회복 |
-| 4 | `./demo.sh pg-reset` (corporate: 새 레코드 삭제 후) | | 원래 상태 | 다음 테이크 준비 |
-| (별도) | `./demo.sh pg-primary-down` → `grep "dns fallback"` | DNS 탭 지연, 체크아웃 +2초 | `primary … → TIMEOUT (2007ms) \| secondary … → IP` | 주 DNS 가 죽으면 보조로 넘어가지만 매번 2초씩 기다린다 |
-| (별도, cluster 모드) | 터미널 1: `./demo.sh corpdns logs` / 터미널 2: `./demo.sh pg-primary-down` | 사내 DNS 파드 로그 | `ns1-corp-dns(primary)` 로그가 멈추고 같은 결제 파드 질의가 `ns2-corp-dns(secondary)` 에 찍힘 | 주 → 보조 전환을 DNS 서버 쪽에서도 확인 |
+| 2 | (터미널) `oc -n demo-shop logs deploy/payment-service --since=1m \| grep -A1 "upstream call failed" \| tail -2` | 결제 서비스 로그 | `Error: getaddrinfo ENOTFOUND api-new.pg.example` | 앱은 "이름을 찾지 못했다"는 예외만 남긴다 — 원인은 eBPF DNS 탭이 먼저 보여줬다 |
+| 3 | `./demo.sh pg-register` | DNS 탭, 체크아웃 | NXDOMAIN 멈춤, 체크아웃 201 | 사내 DNS 에 한 줄 등록하자 **앱 재시작 없이** 회복 |
+| 4 | `./demo.sh pg-reset` | | 원래 상태 | 다음 테이크 준비 |
 
-- 촬영 전 `./demo.sh pg-status` 로 체크아웃이 201 인지 확인합니다.
-- PG 호출(HTTPS)의 내용은 Node.js 라 eBPF 로 볼 수 없습니다. 대본에서 "PG 호출 오류율" 대신 **DNS 탭의 NXDOMAIN·지연**으로 말합니다.
+- PG 호출(HTTPS)의 내용은 Node.js 라 eBPF 로 볼 수 없습니다. 대본에서 "PG 호출 오류율" 대신 **DNS 탭의 NXDOMAIN** 으로 말합니다.
+
+## 시나리오 3 — 주 DNS 장애 (보조 DNS 로 정상 동작)
+
+로그 예시는 [README 6-3](../README.md#6-3-시나리오-3--주-dns-장애).
+
+| 순서 | 명령 | 화면 | 보여줄 것 | 말할 것 |
+| --- | --- | --- | --- | --- |
+| 0 | 터미널 1: `./demo.sh corpdns logs` | 사내 DNS 로그 | 질의가 모두 `ns1-corp-dns(primary)` 에 찍힘 | 평소에는 주 DNS 가 모든 질의를 받는다 |
+| 1 | 터미널 2: `./demo.sh dns-primary-down` | `oc -n demo-infra get pods` | `ns1-corp-dns-0` 사라짐 | 주 DNS 서버가 죽었다 |
+| 2 | 터미널 1 | 사내 DNS 로그 | 같은 결제·배송 파드의 질의가 `ns2-corp-dns(secondary)` 에 찍힘 | 리졸버가 보조 DNS 로 넘어갔다 |
+| 3 | `./demo.sh dns-status` · 결제·배송 서비스 DNS 탭 | | 체크아웃 201, 배송 조회 200, 오류율 0 | 보조 DNS 덕분에 서비스는 정상 — 앱 로그에도 에러 없음 |
+| 4 | `./demo.sh dns-primary-up` | | 두 파드 Running | 다음 테이크 준비 |
 
 ---
 

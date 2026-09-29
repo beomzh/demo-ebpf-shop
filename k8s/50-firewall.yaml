@@ -4,10 +4,8 @@
 #
 # 규칙 목록 보기:  kubectl -n demo-shop get netpol -l demo.observ/firewall=egress
 #
-# 1) 기본 규칙: 배송 서비스는 사내 DNS(주·보조) 질의만 허용 → 그 밖의 모든 나가는 연결 차단
-#    cluster 모드: demo-infra 의 사내 DNS 파드(ns1/ns2-corp-dns). Service 53 → 파드 1053 으로 DNAT 되므로 파드 포트 1053
-#    bastion·corporate 모드: 사내 DNS IP 2개의 53
-#    (__CORP_DNS_PEERS__ / __CORP_DNS_PORT__ 는 scripts/lib.sh render 가 모드에 맞게 채운다)
+# 1) 기본 규칙: 배송 서비스는 사내 DNS(demo-infra 의 ns1/ns2-corp-dns) 질의만 허용 → 그 밖의 모든 나가는 연결 차단
+#    (Service 53 → 파드 1053 으로 DNAT 되므로 파드 포트 1053 을 허용한다)
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -22,10 +20,14 @@ spec:
     matchLabels: { app: delivery-service }
   policyTypes: [Egress]
   egress:
-    - to: __CORP_DNS_PEERS__
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: demo-infra }
+          podSelector:
+            matchLabels: { app: corp-dns }
       ports:
-        - { protocol: UDP, port: __CORP_DNS_PORT__ }
-        - { protocol: TCP, port: __CORP_DNS_PORT__ }
+        - { protocol: UDP, port: 1053 }
+        - { protocol: TCP, port: 1053 }
 ---
 # 2) 택배사 API 허용 — 등록 당시의 IP(예전 IP) 만 허용되어 있다.
 apiVersion: networking.k8s.io/v1

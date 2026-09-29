@@ -1,13 +1,10 @@
-# 사내 DNS (CORP_DNS_MODE=cluster) — 주 DNS ns1-corp-dns, 보조 DNS ns2-corp-dns
-#   - 결제 서비스(PG 도메인)와 배송 서비스(택배사 도메인)가 이 두 서버에 주 → 보조 순서로 질의한다 (클러스터 DNS 를 거치지 않음)
+# 사내 DNS — 주 DNS ns1-corp-dns, 보조 DNS ns2-corp-dns
+#   - 결제 서비스(PG 도메인)와 배송 서비스(택배사 도메인)는 이 두 서버를 파드의 DNS 서버로 쓴다 (주 → 보조 순서)
 #   - 두 서버는 같은 존(corp-dns-zone ConfigMap)을 읽는다 = 주 → 보조 존 복제가 끝난 상태
 #   - 루트(.) 존을 권한 있게 맡으므로 등록되지 않은 이름에는 NXDOMAIN 을 답한다
-#   - demo-infra 는 인바운드 기본 차단(55-network-isolation.yaml)이라 허용 정책을 둔다
-#       결제 → 주 / 결제 → 보조 (서버별로 따로), 배송 → 주·보조
-#   - 주 DNS 장애는 파드를 죽이지 않고 결제 → 주 DNS 허용 정책(allow-corp-dns-primary-from-payment)을 지워서 만든다
-#     (PG 시나리오는 결제 서비스만 겪도록 — 택배사 시나리오의 배송 서비스는 영향 없음)
-#     → 기본 차단 정책이 질의를 버림 (응답 없음 = 타임아웃). primary-up 은 이 파일을 다시 적용해 정책을 되살린다
-#   - 로그에 질의마다 서버 이름이 찍힌다 → 주 → 보조로 넘어가는 순간을 파드 로그로 확인
+#   - cluster.local 은 클러스터 DNS 로 전달한다 (결제 서비스가 회원 서비스를 찾을 수 있게)
+#   - 로그에 질의마다 서버 이름이 찍힌다 → 주 DNS 파드를 지우면 질의가 보조 DNS 로 넘어가는 것이 보인다
+#   - demo-infra 는 인바운드 기본 차단(55-network-isolation.yaml)이라 결제·배송 → 사내 DNS 허용 정책을 둔다
 # 존 ConfigMap(corp-dns-zone)은 레코드를 바꿀 수 있도록 매니페스트가 아니라 스크립트(scripts/corpdns.sh)가 만든다.
 apiVersion: v1
 kind: ConfigMap
@@ -16,6 +13,12 @@ metadata:
   namespace: demo-infra
 data:
   Corefile.primary: |
+    cluster.local:1053 {
+        forward . /etc/resolv.conf
+        cache 30
+        log . "{remote} → ns1-corp-dns(primary) {type} {name} {rcode} {duration} (클러스터 DNS 로 전달)"
+        errors
+    }
     .:1053 {
         file /etc/coredns/zone/db.corp . {
             reload 2s
@@ -24,6 +27,12 @@ data:
         errors
     }
   Corefile.secondary: |
+    cluster.local:1053 {
+        forward . /etc/resolv.conf
+        cache 30
+        log . "{remote} → ns2-corp-dns(secondary) {type} {name} {rcode} {duration} (클러스터 DNS 로 전달)"
+        errors
+    }
     .:1053 {
         file /etc/coredns/zone/db.corp . {
             reload 2s
@@ -147,47 +156,7 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-corp-dns-primary-from-payment
-  namespace: demo-infra
-  labels: { demo.observ/policy: isolation, demo.observ/scenario: pg-dns }
-spec:
-  podSelector:
-    matchLabels: { app: corp-dns, dns-role: primary }
-  policyTypes: [Ingress]
-  ingress:
-    - from:
-        - namespaceSelector:
-            matchLabels: { kubernetes.io/metadata.name: demo-shop }
-          podSelector:
-            matchLabels: { app: payment-service }
-      ports:
-        - { protocol: UDP, port: 1053 }
-        - { protocol: TCP, port: 1053 }
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-corp-dns-secondary-from-payment
-  namespace: demo-infra
-  labels: { demo.observ/policy: isolation, demo.observ/scenario: pg-dns }
-spec:
-  podSelector:
-    matchLabels: { app: corp-dns, dns-role: secondary }
-  policyTypes: [Ingress]
-  ingress:
-    - from:
-        - namespaceSelector:
-            matchLabels: { kubernetes.io/metadata.name: demo-shop }
-          podSelector:
-            matchLabels: { app: payment-service }
-      ports:
-        - { protocol: UDP, port: 1053 }
-        - { protocol: TCP, port: 1053 }
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-corp-dns-from-delivery
+  name: allow-corp-dns-from-clients
   namespace: demo-infra
   labels: { demo.observ/policy: isolation }
 spec:
@@ -199,7 +168,8 @@ spec:
         - namespaceSelector:
             matchLabels: { kubernetes.io/metadata.name: demo-shop }
           podSelector:
-            matchLabels: { app: delivery-service }
+            matchExpressions:
+              - { key: app, operator: In, values: [payment-service, delivery-service] }
       ports:
         - { protocol: UDP, port: 1053 }
         - { protocol: TCP, port: 1053 }

@@ -1,7 +1,0 @@
-$ORIGIN .
-$TTL 5
-.                 IN SOA ns1.corp.example. admin.corp.example. ( 1 60 60 600 5 )
-.                 IN NS  ns1.corp.example.
-ns1.corp.example. IN A   172.28.0.53
-ns2.corp.example. IN A   172.28.0.54
-api.pg.example.   IN A   172.28.0.100

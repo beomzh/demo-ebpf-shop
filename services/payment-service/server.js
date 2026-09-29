@@ -3,17 +3,13 @@
 //   POST /payments {orderId, memberId, amount}   → 회원 서비스 GET /members/{id} (VIP 할인)
 //                                                → 외부 PG사 POST https://<PG_DOMAIN>/v1/payments/approve (승인)
 //
-// PG 도메인은 클러스터 DNS 가 아니라 "사내 DNS"(PG_DNS_SERVERS: 주, 보조 순)에 직접 질의한다.
-//   PG_DNS_SERVERS 형식: "IP,IP" 또는 "이름=IP,이름=IP" (이름은 로그에만 쓴다. 예: ns1-corp-dns=172.30.0.10)
-//   - 주 DNS 가 응답하지 않으면(ETIMEOUT·ECONNREFUSED·ESERVFAIL) 보조 DNS 로 넘어가고, 그 과정을 WARN 으로 남긴다
-//   - NXDOMAIN(ENOTFOUND)은 "그런 이름은 없다"는 확정 응답이므로 보조로 넘어가지 않고 바로 실패한다 (OS 리졸버와 같은 동작)
-//   - PG_DNS_SERVERS 가 비어 있으면 OS 리졸버(getaddrinfo)를 쓴다 → 실패 시 'getaddrinfo ENOTFOUND'
+// PG 도메인은 평범하게 OS 리졸버(getaddrinfo)로 조회한다. 파드의 DNS 서버가 사내 DNS(주·보조)이므로
+// 레코드가 없으면 'getaddrinfo ENOTFOUND', 주 DNS 가 없으면 OS 리졸버가 알아서 보조 DNS 에 묻는다.
 // 외부 의존성 없이 node 내장 모듈만 사용한다. 서비스 간 호출은 평문 HTTP/1.1.
 'use strict';
 
 const http = require('node:http');
 const https = require('node:https');
-const dns = require('node:dns');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 
@@ -22,9 +18,6 @@ const MEMBER_URL = new URL(process.env.MEMBER_URL || 'http://member-service:8080
 const agent = new http.Agent({ keepAlive: true, maxSockets: 50 });
 
 const PG_DOMAIN = process.env.PG_DOMAIN || 'api.pg.example';
-const PG_DNS_SERVERS = (process.env.PG_DNS_SERVERS || '').split(',').map((v) => v.trim()).filter(Boolean)
-  .map((v) => { const [name, ip] = v.includes('=') ? v.split('=') : ['', v]; return { name, ip }; });
-const PG_DNS_TIMEOUT_MS = Number(process.env.PG_DNS_TIMEOUT_MS || 2000);
 const PG_CA_FILE = process.env.PG_CA_FILE || '/etc/demo-ca/ca.crt';
 const PG_CA = fs.existsSync(PG_CA_FILE) ? fs.readFileSync(PG_CA_FILE) : undefined;
 
@@ -81,86 +74,26 @@ function getMember(memberId, reqId) {
   });
 }
 
-// Node.js DNS 에러 코드 → DNS 응답 이름 (로그에 NXDOMAIN 등으로 분명히 남기기 위해)
-const DNS_RESULT = {
-  ENOTFOUND: 'NXDOMAIN',     // 그런 이름 없음 (사내 DNS 에 레코드 미등록)
-  ENODATA: 'NODATA',         // 이름은 있지만 A 레코드 없음
-  ESERVFAIL: 'SERVFAIL',     // DNS 서버 내부 오류
-  EREFUSED: 'REFUSED',       // DNS 서버가 질의 거부
-  ETIMEOUT: 'TIMEOUT',       // DNS 서버 응답 없음
-  ECONNREFUSED: 'CONNREFUSED',
-};
-const DNS_MEANING = {
-  NXDOMAIN: '사내 DNS 에 이 도메인 레코드가 없음',
-  NODATA: '사내 DNS 에 이 도메인의 A 레코드가 없음',
-  SERVFAIL: '사내 DNS 서버 오류',
-  REFUSED: '사내 DNS 가 질의를 거부함',
-  TIMEOUT: '사내 DNS 가 응답하지 않음',
-  CONNREFUSED: '사내 DNS 포트가 닫혀 있음',
-};
-const dnsResult = (err) => DNS_RESULT[err.code] || err.code;
-
-// PG 도메인을 사내 DNS 에 주 → 보조 순서로 질의한다. 실패하면 마지막 DNS 에러(err.attempts, err.dnsResult 포함)를 던진다.
-async function resolvePg(host) {
-  if (PG_DNS_SERVERS.length === 0) {
-    const { address } = await dns.promises.lookup(host, { family: 4 });   // OS 리졸버
-    return { ip: address, attempts: [] };
-  }
-  const attempts = [];
-  let lastErr;
-  for (const [i, { name, ip: server }] of PG_DNS_SERVERS.entries()) {
-    const who = `${i === 0 ? 'primary' : 'secondary'} ${name ? `${name}(${server})` : server}`;
-    const resolver = new dns.promises.Resolver({ timeout: PG_DNS_TIMEOUT_MS, tries: 1 });
-    resolver.setServers([server]);
-    const started = Date.now();
-    try {
-      const [ip] = await resolver.resolve4(host);
-      attempts.push(`${who} → ${ip} (${Date.now() - started}ms)`);
-      return { ip, attempts };
-    } catch (err) {
-      attempts.push(`${who} → ${dnsResult(err)} (${err.code}, ${Date.now() - started}ms)`);
-      lastErr = err;
-      lastErr.server = who;
-      if (err.code === 'ENOTFOUND' || err.code === 'ENODATA') break;   // NXDOMAIN: 확정 응답 → 보조로 넘어가지 않음
-    }
-  }
-  lastErr.attempts = attempts;
-  lastErr.dnsResult = dnsResult(lastErr);
-  throw lastErr;
-}
-
-// 외부 PG 승인. 결과는 { status, body, ms, error?, stack?, attempts }
-async function approveAtPg(payload, reqId) {
+// 외부 PG 승인. 결과는 { status, body, ms, error?, stack? } (연결 실패·타임아웃이면 status 0)
+function approveAtPg(payload, reqId) {
   const started = Date.now();
-  let resolved;
-  try {
-    resolved = await resolvePg(PG_DOMAIN);
-  } catch (err) {
-    const result = err.dnsResult || dnsResult(err);
-    return {
-      status: 0, body: '', ms: Date.now() - started, stack: err.stack, attempts: err.attempts || [],
-      dns: { result, server: err.server || 'system resolver', meaning: DNS_MEANING[result] || err.message },
-      error: `DNS ${result}: ${PG_DOMAIN} (${err.message})`,
-    };
-  }
   return new Promise((resolve) => {
     const body = JSON.stringify(payload);
     const req = https.request({
-      host: resolved.ip,          // 사내 DNS 로 얻은 IP 로 연결하고
-      servername: PG_DOMAIN,      // TLS SNI·인증서 검증은 PG 도메인으로
+      host: PG_DOMAIN,
       port: 443,
       path: '/v1/payments/approve',
       method: 'POST',
       ca: PG_CA,
       timeout: 3000,
-      headers: { Host: PG_DOMAIN, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), 'X-Request-Id': reqId },
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), 'X-Request-Id': reqId },
     }, (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
-      res.on('end', () => resolve({ status: res.statusCode, body: data, ms: Date.now() - started, attempts: resolved.attempts }));
+      res.on('end', () => resolve({ status: res.statusCode, body: data, ms: Date.now() - started }));
     });
     req.on('timeout', () => req.destroy(new Error('timeout')));
-    req.on('error', (err) => resolve({ status: 0, body: '', ms: Date.now() - started, error: `${err.code || err.name}: ${err.message}`, stack: err.stack, attempts: resolved.attempts }));
+    req.on('error', (err) => resolve({ status: 0, body: '', ms: Date.now() - started, error: `${err.code || err.name}: ${err.message}`, stack: err.stack }));
     req.end(body);
   });
 }
@@ -197,24 +130,14 @@ const server = http.createServer(async (req, res) => {
     const grade = JSON.parse(member.body).grade;
     const charged = grade === 'VIP' ? Math.round(body.amount * 0.9) : body.amount;
 
-    // 외부 PG 승인 (사내 DNS 로 PG 도메인 조회 → HTTPS)
+    // 외부 PG 승인 (HTTPS)
     const pg = await approveAtPg({ orderId: body.orderId, amount: charged }, reqId);
-    const target = `pg(${PG_DOMAIN})`;
-    if (pg.attempts.length > 1 && pg.status !== 0) {
-      log('WARN', `dns fallback req=${reqId} host=${PG_DOMAIN} attempts="${pg.attempts.join(' | ')}"`);
-    }
     if (pg.status !== 200) {
+      const target = `pg(${PG_DOMAIN})`;
+      const path = errorPath(target, pg);
       const url = `https://${PG_DOMAIN}/v1/payments/approve`;
-      if (pg.dns) {
-        // 원인 한 줄: 어느 DNS 가 무엇이라고 답했는지
-        log('ERROR', `dns lookup failed req=${reqId} host=${PG_DOMAIN} result=${pg.dns.result} server="${pg.dns.server}" — ${pg.dns.meaning}`);
-      }
-      const dnsInfo = pg.attempts.length ? ` dns="${pg.attempts.join(' | ')}"` : '';
-      const path = pg.status === 0
-        ? `${SERVICE} → ${target} [${pg.error}${dnsInfo ? ' —' + dnsInfo.replace(/^ dns=/, ' ').replace(/"/g, '') : ''}]`
-        : `${SERVICE} → ${target}[${pg.status}]`;
       log(pg.status === 0 ? 'ERROR' : 'WARN',
-        `upstream call failed req=${reqId} target=${target} call="POST ${url}" status=${pg.status} elapsedMs=${pg.ms} orderId=${body.orderId}${dnsInfo} path="${path}"`
+        `upstream call failed req=${reqId} target=${target} call="POST ${url}" status=${pg.status} elapsedMs=${pg.ms} orderId=${body.orderId} path="${path}"`
         + (pg.stack ? `\n${pg.stack}` : ''));
       return send(res, pg.status === 0 ? 504 : 502, { error: 'pg call failed', errorPath: path });
     }

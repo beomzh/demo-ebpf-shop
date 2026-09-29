@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 쇼핑몰 여덟 서비스 + MySQL·Redis + 데모 장치(사내 DNS(cluster 모드), 방화벽, 부하 발생기)를 배포한다.
+# 쇼핑몰 여덟 서비스 + MySQL·Redis + 데모 장치(사내 DNS 주·보조, 방화벽, 부하 발생기)를 배포한다.
 # 배포 직후 상태 = "월요일 밤 이전" 정상 상태 (사내 DNS 의 택배사 레코드 → 예전 IP, 방화벽 → 예전 IP 허용)
 source "$(dirname "$0")/lib.sh"
 load_env
@@ -49,13 +49,15 @@ fi
 kc -n "$INFRA_NS" delete deploy/courier-dns svc/courier-dns cm/courier-dns-corefile cm/courier-hosts \
   netpol/allow-courier-dns-from-delivery --ignore-not-found >/dev/null 2>&1 || true
 
-if [[ "$CORP_DNS_MODE" == cluster ]]; then
-  "$ROOT/scripts/corpdns.sh" up
-  CORP_DNS_PRIMARY="$(corp_dns_svc_ip "$CORP_DNS_PRIMARY_NAME")"
-  CORP_DNS_SECONDARY="$(corp_dns_svc_ip "$CORP_DNS_SECONDARY_NAME")"
-fi
+"$ROOT/scripts/corpdns.sh" up
+CORP_DNS_PRIMARY="$(corp_dns_svc_ip "$CORP_DNS_PRIMARY_NAME")"
+CORP_DNS_SECONDARY="$(corp_dns_svc_ip "$CORP_DNS_SECONDARY_NAME")"
 [[ -n "$CORP_DNS_PRIMARY" && -n "$CORP_DNS_SECONDARY" ]] || die "사내 DNS 주소가 비어 있습니다."
-info "사내 DNS (결제 → PG 도메인, 배송 → 택배사 도메인): $(pg_dns_servers)"
+info "결제·배송 서비스의 DNS 서버: 주 ${CORP_DNS_PRIMARY}, 보조 ${CORP_DNS_SECONDARY}"
+# 예전 버전의 주 DNS 차단 정책이 남아 있으면 지운다
+kc -n "$INFRA_NS" delete netpol allow-corp-dns-primary-from-payment allow-corp-dns-secondary-from-payment allow-corp-dns-from-delivery \
+  --ignore-not-found >/dev/null 2>&1 || true
+kc -n "$APP_NS" delete netpol fw-corpdns-primary-unreachable --ignore-not-found >/dev/null 2>&1 || true
 
 info "mysql + redis + 여덟 서비스"
 render "$K/10-mysql.yaml" | kc apply -f -
