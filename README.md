@@ -8,7 +8,9 @@
 데모 전체가 **배송 조회 실패 사건 하나**로 이어지며, 코드가 아니라 **네트워크**에서 생긴 문제라
 eBPF 가 가장 잘 보여줄 수 있는 사건입니다. 화면에 나오는 모든 데이터는 eBPF 노드 에이전트 수집 결과입니다.
 
-- **대상 환경: OpenShift(OCP) 4.12 이상 + OCP 내부 이미지 레지스트리**
+- **대상 환경** (둘 다 테스트 완료)
+  - **OpenShift(OCP) 4.16 이상** + OCP 내부 이미지 레지스트리
+  - **RKE2 같은 바닐라 쿠버네티스** + 외부 이미지 레지스트리(예: Harbor) — [14. 부록](#바닐라-쿠버네티스-rke2-등)
 - 모든 명령은 `./demo.sh <명령>` 하나로 실행합니다 (`make` 불필요, bash 만 있으면 됨)
 - 촬영 순서·화면·멘트: **[docs/runbook.md](docs/runbook.md)**
 
@@ -29,7 +31,7 @@ eBPF 가 가장 잘 보여줄 수 있는 사건입니다. 화면에 나오는 �
 11. [보안](#11-보안)
 12. [문제 해결](#12-문제-해결)
 13. [정리 (삭제)](#13-정리-삭제)
-14. [부록: 로컬 스모크 테스트 · 외부 레지스트리 · 일반 쿠버네티스](#14-부록)
+14. [부록: 로컬 스모크 테스트 · 외부 레지스트리 · 바닐라 쿠버네티스(RKE2)](#14-부록)
 
 ---
 
@@ -281,18 +283,19 @@ for d in gateway-service order-service delivery-service; do echo "== $d"; oc -n 
 
 | 항목 | 조건 |
 | --- | --- |
-| OpenShift | **4.12 이상** (RHCOS 커널 5.14 → eBPF 조건 "커널 4.16 이상" 충족) |
-| 네트워크 | 기본 CNI **OVN-Kubernetes** (NetworkPolicy 로 방화벽 차단을 흉내 냄) |
-| 내부 이미지 레지스트리 | 활성화 상태 (`oc get co image-registry` 가 Available). default route 는 5-6 에서 엽니다 |
+| 쿠버네티스 | **OpenShift 4.16 이상**, 또는 **RKE2 등 바닐라 쿠버네티스** (테스트: RKE2 + Canal + Harbor). 노드 커널 4.16 이상 (eBPF 조건) |
+| 네트워크 | NetworkPolicy 를 집행하는 CNI (NetworkPolicy 로 방화벽 차단을 흉내 냄) — OCP: 기본 **OVN-Kubernetes**, RKE2: 기본 **Canal** |
+| 이미지 레지스트리 | OCP: **내부 이미지 레지스트리** 활성화 상태 (`oc get co image-registry` 가 Available, default route 는 5-6 에서 엽니다)<br/>바닐라 쿠버네티스: **외부 레지스트리**(예: Harbor) — `REGISTRY_MODE=external` ([14. 부록](#바닐라-쿠버네티스-rke2-등)) |
 | 외부 이미지 pull | 노드가 `docker.io`, `quay.io`, `registry.k8s.io` 에서 pull 가능해야 함 (부하 발생기·DNS·MySQL·Redis 이미지). 폐쇄망이면 [12. 문제 해결](#12-문제-해결) 참고 |
 | Observ 노드 에이전트 | 설치 완료, **ClickHouse 와 노드 에이전트의 traces endpoint 설정 필수** (없으면 T-Map·트랜잭션 조회가 비어 있음). OpenTelemetry 에이전트·SDK 는 설치하지 않음 |
-| 계정 권한 | **cluster-admin 권장**. 필요 권한: 네임스페이스 생성, 노드 조회(점검), 레지스트리 설정 변경(5-6, 한 번). cluster-admin 이 아니면 5-6 만 관리자에게 요청 |
+| 계정 권한 | **cluster-admin 권장**. 필요 권한: 네임스페이스 생성, 노드 조회(점검), 레지스트리 설정 변경(OCP 5-6, 한 번). cluster-admin 이 아니면 5-6 만 관리자에게 요청 |
 
 ### 작업 PC (bastion)
 
 | 도구 | 확인 명령 | 설치 (RHEL 8/9) |
 | --- | --- | --- |
-| `oc` | `oc version --client` | OCP 콘솔 우측 상단 `?` → Command line tools, 또는 mirror.openshift.com 의 `openshift-client-linux.tar.gz` |
+| `oc` (OCP) | `oc version --client` | OCP 콘솔 우측 상단 `?` → Command line tools, 또는 mirror.openshift.com 의 `openshift-client-linux.tar.gz` |
+| `kubectl` (바닐라 쿠버네티스) | `kubectl version --client` | RKE2 서버 노드의 `/var/lib/rancher/rke2/bin/kubectl` 과 `/etc/rancher/rke2/rke2.yaml`(kubeconfig) 사용 가능 |
 | `podman` 4.x 이상 | `podman --version` | `sudo dnf install -y podman` |
 | `git` | `git --version` | `sudo dnf install -y git` |
 | `openssl` | `openssl version` | `sudo dnf install -y openssl` |
@@ -1207,12 +1210,38 @@ REGISTRY_TLS_VERIFY=true
 `podman login harbor.example.com` 후 `./demo.sh push` → `./demo.sh deploy`. 사설 레지스트리 인증이 필요하면
 `demo-shop` 네임스페이스 default 서비스어카운트에 pull secret 을 연결하세요.
 
-### 일반 쿠버네티스
+### 바닐라 쿠버네티스 (RKE2 등)
 
-`CLI=kubectl`, `REGISTRY_MODE=external` 로 두면 됩니다 (`oc` 가 없으면 `CLI=auto` 도 kubectl 을 고릅니다).
-NetworkPolicy 를 집행하는 CNI(Calico, Canal, Cilium, OVN-Kubernetes 등)가 필요합니다.
+RKE2 같은 바닐라 쿠버네티스도 지원합니다 (**RKE2 + Canal + Harbor 로 테스트 완료**). OCP 와 다른 점은 CLI 와 이미지 레지스트리뿐이고,
+세 시나리오·명령은 똑같습니다. NetworkPolicy 를 집행하는 CNI(Canal, Calico, Cilium, OVN-Kubernetes 등)가 필요합니다.
 
+`demo.env` (Harbor 예시):
+
+```bash
+CLI=kubectl                                   # oc 가 없으면 CLI=auto 도 kubectl 을 고름
+REGISTRY_MODE=external
+REGISTRY=harbor.example.com/demo-shop         # Harbor 프로젝트. push·pull 같은 주소
+REGISTRY_TLS_VERIFY=true                      # Harbor 인증서가 사설이면 false
+```
+
+```bash
+podman login harbor.example.com               # 작업 PC 에서 push 권한 있는 계정으로
+./demo.sh check
+./demo.sh push                                # 빌드 → Harbor 로 push
+./demo.sh deploy
+```
+
+- Harbor 프로젝트가 **비공개**면 노드가 pull 할 수 있도록 `demo-shop` 네임스페이스에 pull secret 을 만들어 default 서비스어카운트에 연결합니다:
+
+  ```bash
+  kubectl -n demo-shop create secret docker-registry harbor-pull \
+    --docker-server=harbor.example.com --docker-username=<계정> --docker-password=<비밀번호>
+  kubectl -n demo-shop patch serviceaccount default -p '{"imagePullSecrets":[{"name":"harbor-pull"}]}'
+  ```
+
+  (공개 프로젝트면 필요 없습니다.) Harbor 인증서가 사설이면 RKE2 노드의 `/etc/rancher/rke2/registries.yaml` 에 CA 를 등록하세요.
+- OCP 전용 단계(5-6 레지스트리 route, `oc` 로그인)는 건너뜁니다. `./demo.sh images` 는 ImageStream 이 없으므로 쓰지 않습니다.
 - OpenShift 가 아니면(SCC API 없음) 스크립트가 자동으로: loadgen·사내 DNS(이미지 USER 가 이름)와 `check` 의 점검 파드에
   `runAsUser: 65532` 를 넣습니다. 나머지 이미지는 USER 가 숫자라 그대로 됩니다.
-- Pod Security `restricted` 가 클러스터 전체에 강제돼 있어도 모든 파드가 뜹니다 (k3s + restricted 로 확인).
+- Pod Security `restricted` 가 네임스페이스에 강제돼 있어도 모든 파드가 뜹니다.
 빌드는 `CONTAINER_ENGINE=docker` 로 `docker buildx` 를 쓸 수 있습니다.
