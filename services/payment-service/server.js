@@ -21,9 +21,17 @@ const PG_DOMAIN = process.env.PG_DOMAIN || 'api.pg.example';
 const PG_CA_FILE = process.env.PG_CA_FILE || '/etc/demo-ca/ca.crt';
 const PG_CA = fs.existsSync(PG_CA_FILE) ? fs.readFileSync(PG_CA_FILE) : undefined;
 
+// 로그 시각: 컨테이너 시간대(TZ, 기본 Asia/Seoul) 기준 + 오프셋. 예) 2026-09-30T14:21:00.123+09:00
+function localTs(d = new Date()) {
+  const p = (n, w = 2) => String(n).padStart(w, '0');
+  const off = -d.getTimezoneOffset();
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+    + `.${p(d.getMilliseconds(), 3)}${off >= 0 ? '+' : '-'}${p(Math.floor(Math.abs(off) / 60))}:${p(Math.abs(off) % 60)}`;
+}
+
 // 로그는 한 줄짜리 JSON: {ts, level, service, msg, ...필드}. 스택 트레이스도 stack 필드 하나에 담는다
 function log(level, msg, fields = {}) {
-  console.log(JSON.stringify({ ts: new Date().toISOString(), level, service: 'payment-service', msg, ...fields }));
+  console.log(JSON.stringify({ ts: localTs(), level, service: 'payment-service', msg, ...fields }));
 }
 
 const SERVICE = 'payment-service';

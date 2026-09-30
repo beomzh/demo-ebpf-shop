@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	_ "time/tzdata" // distroless 이미지에는 시간대 데이터가 없을 수 있어 바이너리에 넣는다 (TZ=Asia/Seoul)
 )
 
 type Product struct {
@@ -110,8 +111,9 @@ func fetchStock(id int, reqID string) (*int, error) {
 // logger : 한 줄짜리 JSON {ts, level, service, msg, ...필드} 로 표준출력에 남긴다 (Go 표준 log/slog)
 var logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 	ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+		// 시각: 컨테이너 시간대(TZ, 기본 Asia/Seoul) 기준 + 오프셋. 예) 2026-09-30T14:21:00.123+09:00
 		if a.Key == slog.TimeKey && len(groups) == 0 {
-			return slog.String("ts", a.Value.Time().UTC().Format("2006-01-02T15:04:05.000Z"))
+			return slog.String("ts", a.Value.Time().Format("2006-01-02T15:04:05.000Z07:00"))
 		}
 		return a
 	},

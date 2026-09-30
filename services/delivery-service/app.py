@@ -20,6 +20,7 @@ import socket
 import ssl
 import time
 import zlib
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.getenv("PORT", "8080"))
@@ -36,7 +37,8 @@ class JsonFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         entry = {
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(record.created)) + f".{int(record.msecs):03d}Z",
+            # 컨테이너 시간대(TZ, 기본 Asia/Seoul) 기준 + 오프셋. 예) 2026-09-30T14:21:00.123+09:00
+            "ts": datetime.fromtimestamp(record.created).astimezone().isoformat(timespec="milliseconds"),
             "level": record.levelname,
             "service": SERVICE,
             "msg": record.getMessage(),

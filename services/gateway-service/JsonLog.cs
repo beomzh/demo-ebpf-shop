@@ -26,7 +26,8 @@ static class JsonLog
         using (var w = new Utf8JsonWriter(ms, Options))
         {
             w.WriteStartObject();
-            w.WriteString("ts", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"));
+            // 시각: 컨테이너 시간대(TZ, 기본 Asia/Seoul) 기준 + 오프셋. 예) 2026-09-30T14:21:00.123+09:00
+            w.WriteString("ts", DateTimeOffset.Now.ToString("yyyy-MM-ddTHH:mm:ss.fffzzz"));
             w.WriteString("level", level);
             w.WriteString("service", Service);
             w.WriteString("msg", msg);

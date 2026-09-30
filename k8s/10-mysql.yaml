@@ -24,6 +24,8 @@ spec:
       containers:
         - name: mysql
           image: quay.io/sclorg/mysql-80-c9s:c9s
+          env:
+            - { name: TZ, value: "Asia/Seoul" }   # 한국 시간
           envFrom:
             - secretRef: { name: mysql-auth }
           ports:

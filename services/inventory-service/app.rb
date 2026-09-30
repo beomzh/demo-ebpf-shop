@@ -19,7 +19,8 @@ $stdout.sync = true
 # 로그는 한 줄짜리 JSON: {ts, level, service, msg, ...필드}. LOG.info(['메시지', {필드}]) 처럼 배열로 넘긴다
 LOG = Logger.new($stdout)
 LOG.formatter = proc do |sev, time, _, (msg, fields)|
-  JSON.generate({ ts: time.utc.strftime('%Y-%m-%dT%H:%M:%S.%LZ'), level: sev, service: 'inventory-service', msg: msg }
+  # 시각: 컨테이너 시간대(TZ, 기본 Asia/Seoul) 기준 + 오프셋. 예) 2026-09-30T14:21:00.123+09:00
+  JSON.generate({ ts: time.strftime('%Y-%m-%dT%H:%M:%S.%L%:z'), level: sev, service: 'inventory-service', msg: msg }
                   .merge(fields || {})) + "\n"
 end
 

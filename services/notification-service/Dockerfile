@@ -1,4 +1,6 @@
 FROM docker.io/library/php:8.3-cli
+# 컨테이너 기본 시간대 = 한국 시간 (로그 ts 가 +09:00 으로 찍힘)
+ENV TZ=Asia/Seoul
 WORKDIR /app
 COPY --chmod=644 index.php .
 # 내장 웹서버를 여러 워커로 띄운다 (한 요청이 느려도 다른 요청을 막지 않게)

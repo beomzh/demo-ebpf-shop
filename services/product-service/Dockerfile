@@ -6,6 +6,8 @@ COPY *.go ./
 RUN CGO_ENABLED=0 go build -o /out/product-service .
 
 FROM gcr.io/distroless/static-debian12:nonroot
+# 컨테이너 기본 시간대 = 한국 시간 (로그 ts 가 +09:00 으로 찍힘)
+ENV TZ=Asia/Seoul
 COPY --from=build /out/product-service /product-service
 EXPOSE 8080
 ENTRYPOINT ["/product-service"]

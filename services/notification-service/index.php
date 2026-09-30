@@ -8,10 +8,14 @@ declare(strict_types=1);
 
 $memberUrl = getenv('MEMBER_URL') ?: 'http://member-service:8080';
 
-// 로그는 한 줄짜리 JSON: {ts, level, service, msg, ...필드}
+// PHP 는 TZ 환경변수를 읽지 않으므로 직접 맞춘다 (컨테이너 시간대, 기본 Asia/Seoul)
+date_default_timezone_set(getenv('TZ') ?: 'UTC');
+
+// 로그는 한 줄짜리 JSON: {ts, level, service, msg, ...필드}. 시각 예) 2026-09-30T14:21:00.123+09:00
 function logmsg(string $level, string $msg, array $fields = []): void
 {
-    $entry = ['ts' => gmdate('Y-m-d\TH:i:s') . sprintf('.%03dZ', (int)(fmod(microtime(true), 1) * 1000)),
+    $now = microtime(true);
+    $entry = ['ts' => date('Y-m-d\TH:i:s', (int)$now) . sprintf('.%03d', (int)(fmod($now, 1) * 1000)) . date('P', (int)$now),
               'level' => $level, 'service' => 'notification-service', 'msg' => $msg] + array_filter($fields, fn($v) => $v !== null);
     file_put_contents('php://stderr', json_encode($entry, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n");
 }

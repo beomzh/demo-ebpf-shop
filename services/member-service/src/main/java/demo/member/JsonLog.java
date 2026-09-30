@@ -2,8 +2,8 @@ package demo.member;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
-import java.time.Instant;
-import java.time.temporal.ChronoUnit;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeFormatter;
 
 /**
  * 한 줄짜리 JSON 로그: {"ts","level","service","msg", ...필드}. 표준 라이브러리만 사용한다.
@@ -12,6 +12,8 @@ import java.time.temporal.ChronoUnit;
  */
 final class JsonLog {
     private final String service;
+    // 시각: 컨테이너 시간대(TZ, 기본 Asia/Seoul) 기준 + 오프셋. 예) 2026-09-30T14:21:00.123+09:00
+    private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSXXX");
 
     JsonLog(String service) { this.service = service; }
 
@@ -21,7 +23,7 @@ final class JsonLog {
 
     private void write(String level, String msg, Throwable t, Object... kv) {
         StringBuilder sb = new StringBuilder(256).append('{');
-        field(sb, "ts", Instant.now().truncatedTo(ChronoUnit.MILLIS).toString());
+        field(sb, "ts", OffsetDateTime.now().format(TS));
         field(sb, "level", level);
         field(sb, "service", service);
         field(sb, "msg", msg);

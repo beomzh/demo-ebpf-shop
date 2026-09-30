@@ -25,6 +25,7 @@ spec:
         - name: redis
           image: quay.io/sclorg/redis-7-c9s:c9s
           env:
+            - { name: TZ, value: "Asia/Seoul" }   # 한국 시간
             - name: REDIS_PASSWORD
               valueFrom: { secretKeyRef: { name: redis-auth, key: REDIS_PASSWORD } }
           ports:

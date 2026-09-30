@@ -94,6 +94,8 @@ spec:
             - { name: ORDER_INTERVAL, value: "__LOADGEN_ORDER_INTERVAL__" }
             - { name: TRACKING_INTERVAL, value: "__LOADGEN_TRACKING_INTERVAL__" }
             - { name: BROWSE_INTERVAL, value: "__LOADGEN_BROWSE_INTERVAL__" }
+            # 한국 시간. curl 이미지에는 시간대 데이터가 없어 POSIX 형식(KST, UTC+9)으로 준다
+            - { name: TZ, value: "KST-9" }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
