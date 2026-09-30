@@ -1,0 +1,107 @@
+# DNS 포워더 — 결제·배송 서비스 파드의 DNS 서버 (실제 클러스터의 CoreDNS 역할)
+#   - 외부 도메인(택배사·PG)은 사내 DNS 로 전달한다: 주 DNS(ns1-corp-dns) 먼저, 실패하면 보조 DNS(ns2-corp-dns)
+#     (policy sequential + health_check: 주 DNS 가 응답하지 않으면 1초 안에 '비정상'으로 보고 보조 DNS 로 보낸다)
+#   - cluster.local 은 클러스터 DNS 로 전달한다 (결제 서비스 → 회원 서비스)
+#   - 사내 DNS 가 응답하지 않으면 errors 로그에 "어느 IP 로 질의했는데 실패했는지"가 남는다:
+#       [ERROR] plugin/errors: 2 api.courier.example. A: read udp <포워더>:<포트>-><사내 DNS IP>:53: i/o timeout
+#   - 포워더의 나가는 연결은 사내 방화벽(50-firewall.yaml)이 제한한다: 사내 주 DNS 만 허용, 보조 DNS 는 등록 누락 (시나리오 1)
+# __CORP_DNS_PRIMARY__/SECONDARY 는 scripts/deploy.sh 가 ns1/ns2-corp-dns 서비스의 ClusterIP 로 채운다.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dns-forwarder-corefile
+  namespace: demo-infra
+data:
+  Corefile: |
+    cluster.local:1053 {
+        forward . /etc/resolv.conf
+        cache 30
+        errors
+    }
+    .:1053 {
+        forward . __CORP_DNS_PRIMARY__ __CORP_DNS_SECONDARY__ {
+            policy sequential
+            health_check 1s
+            max_fails 1
+        }
+        log . "{remote} → dns-forwarder {type} {name} {rcode} {duration}"
+        errors
+    }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: dns-forwarder
+  namespace: demo-infra
+  labels: { app: dns-forwarder }
+spec:
+  serviceName: dns-forwarder
+  replicas: 1
+  selector:
+    matchLabels: { app: dns-forwarder }
+  template:
+    metadata:
+      labels: { app: dns-forwarder }
+      annotations:
+        # 전달 대상(사내 DNS 주소)이 바뀌면 값이 달라져 파드가 새 Corefile 로 재시작된다
+        demo.observ/upstreams: "__CORP_DNS_PRIMARY__,__CORP_DNS_SECONDARY__"
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        __NONOCP_RUN_AS_USER__
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: coredns
+          image: registry.k8s.io/coredns/coredns:v1.11.3
+          args: ["-conf", "/etc/coredns/Corefile"]
+          ports:
+            - { name: dns-udp, containerPort: 1053, protocol: UDP }
+            - { name: dns-tcp, containerPort: 1053, protocol: TCP }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            # coredns 바이너리의 파일 capability 때문에 NET_BIND_SERVICE 를 남긴다 (45-corp-dns.yaml 참고)
+            capabilities: { drop: ["ALL"], add: ["NET_BIND_SERVICE"] }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          volumeMounts:
+            - { name: corefile, mountPath: /etc/coredns, readOnly: true }
+      volumes:
+        - name: corefile
+          configMap: { name: dns-forwarder-corefile }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dns-forwarder
+  namespace: demo-infra
+  labels: { app: dns-forwarder }
+spec:
+  selector: { app: dns-forwarder }
+  ports:
+    - { name: dns-udp, port: 53, targetPort: 1053, protocol: UDP }
+    - { name: dns-tcp, port: 53, targetPort: 1053, protocol: TCP }
+---
+# demo-infra 는 인바운드 기본 차단 → 결제·배송 서비스 → DNS 포워더만 허용
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-forwarder-from-clients
+  namespace: demo-infra
+  labels: { demo.observ/policy: isolation }
+spec:
+  podSelector:
+    matchLabels: { app: dns-forwarder }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: demo-shop }
+          podSelector:
+            matchExpressions:
+              - { key: app, operator: In, values: [payment-service, delivery-service] }
+      ports:
+        - { protocol: UDP, port: 1053 }
+        - { protocol: TCP, port: 1053 }

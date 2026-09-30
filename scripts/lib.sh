@@ -10,6 +10,7 @@ FW_LABEL=demo.observ/firewall=egress
 # 사내 DNS 파드 — k8s/45-corp-dns.yaml
 CORP_DNS_PRIMARY_NAME=ns1-corp-dns
 CORP_DNS_SECONDARY_NAME=ns2-corp-dns
+DNS_FORWARDER_NAME=dns-forwarder   # 결제·배송 파드의 DNS 서버 (k8s/47-dns-forwarder.yaml)
 SERVICES=(gateway-service member-service product-service inventory-service order-service payment-service notification-service delivery-service)
 
 # OpenShift 내부 이미지 레지스트리
@@ -49,6 +50,7 @@ load_env() {
   # 사내 DNS 주소 = demo-infra 의 ns1/ns2-corp-dns 서비스 ClusterIP (배포 전이면 빈 값)
   CORP_DNS_PRIMARY="$(corp_dns_svc_ip "$CORP_DNS_PRIMARY_NAME")"
   CORP_DNS_SECONDARY="$(corp_dns_svc_ip "$CORP_DNS_SECONDARY_NAME")"
+  DNS_FORWARDER_IP="$(corp_dns_svc_ip "$DNS_FORWARDER_NAME")"
 }
 
 # ── 클러스터 CLI ─────────────────────────────────────────────
@@ -158,6 +160,7 @@ render() {
     -e "s#__COURIER_IP__#${COURIER_IP}#g" \
     -e "s#__CORP_DNS_PRIMARY__#${CORP_DNS_PRIMARY}#g" \
     -e "s#__CORP_DNS_SECONDARY__#${CORP_DNS_SECONDARY}#g" \
+    -e "s#__DNS_FORWARDER_IP__#${DNS_FORWARDER_IP:-}#g" \
     -e "s#__LOADGEN_ORDER_INTERVAL__#${LOADGEN_ORDER_INTERVAL}#g" \
     -e "s#__LOADGEN_TRACKING_INTERVAL__#${LOADGEN_TRACKING_INTERVAL}#g" \
     -e "s#__LOADGEN_REPLICAS__#${LOADGEN_REPLICAS}#g" \
@@ -207,8 +210,8 @@ corp_zone_apply() {
   kc -n "$INFRA_NS" annotate pod -l app=corp-dns --overwrite "demo.observ/zone-sync=$(date +%s)" >/dev/null 2>&1 || true
 }
 
-# dns_query <도메인> : 결제 파드에서 사내 DNS 서버마다 따로 조회한다 (점검용 — 앱은 OS 리졸버를 씀. 타임아웃 2초)
-#   출력: "<primary|secondary> <서버> <결과> <ms>" 한 줄씩. 결과는 IP 또는 NXDOMAIN(ENOTFOUND)·TIMEOUT(ETIMEOUT)·CONNREFUSED 등
+# dns_query <도메인> : 결제 파드에서 DNS 포워더·사내 주·보조 DNS 에 각각 따로 조회한다 (점검용 — 앱은 OS 리졸버로 포워더에 묻는다. 타임아웃 2초)
+#   출력: "<forwarder|primary|secondary> <서버> <결과> <ms>" 한 줄씩. 결과는 IP 또는 NXDOMAIN(ENOTFOUND)·TIMEOUT(ETIMEOUT)·CONNREFUSED 등
 dns_query() {
   kc -n "$APP_NS" exec deploy/payment-service -- node -e '
 const dns = require("node:dns");
@@ -222,7 +225,8 @@ const codes = { ENOTFOUND: "NXDOMAIN", ENODATA: "NODATA", ESERVFAIL: "SERVFAIL",
     const t = Date.now();
     let res;
     try { res = (await r.resolve4(host)).join(","); } catch (e) { res = (codes[e.code] || e.code) + "(" + e.code + ")"; }
-    console.log([i ? "secondary" : "primary  ", name + "(" + ip + ")", res, (Date.now() - t) + "ms"].join(" "));
+    console.log([["primary  ", "secondary", "forwarder"][i], name + "(" + ip + ")", res, (Date.now() - t) + "ms"].join(" "));
   }
-})();' "$1" "${CORP_DNS_PRIMARY_NAME}=${CORP_DNS_PRIMARY}" "${CORP_DNS_SECONDARY_NAME}=${CORP_DNS_SECONDARY}"
+})();' "$1" "${CORP_DNS_PRIMARY_NAME}=${CORP_DNS_PRIMARY}" "${CORP_DNS_SECONDARY_NAME}=${CORP_DNS_SECONDARY}" \
+    ${DNS_FORWARDER_IP:+"${DNS_FORWARDER_NAME}=${DNS_FORWARDER_IP}"}
 }

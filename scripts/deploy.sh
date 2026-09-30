@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 쇼핑몰 여덟 서비스 + MySQL·Redis + 데모 장치(사내 DNS 주·보조, 방화벽, 부하 발생기)를 배포한다.
-# 배포 직후 상태 = "월요일 밤 이전" 정상 상태 (주·보조 DNS 모두 기동, 방화벽: 배송 → 주 DNS·택배사 허용)
+# 쇼핑몰 여덟 서비스 + MySQL·Redis + 데모 장치(사내 DNS 주·보조, DNS 포워더, 방화벽, 부하 발생기)를 배포한다.
+# 배포 직후 상태 = "월요일 밤 이전" 정상 상태 (주·보조 DNS·포워더 기동, 방화벽: 포워더 → 주 DNS 만 허용)
 source "$(dirname "$0")/lib.sh"
 load_env
 
@@ -52,8 +52,9 @@ kc -n "$INFRA_NS" delete deploy/courier-dns svc/courier-dns cm/courier-dns-coref
 "$ROOT/scripts/corpdns.sh" up
 CORP_DNS_PRIMARY="$(corp_dns_svc_ip "$CORP_DNS_PRIMARY_NAME")"
 CORP_DNS_SECONDARY="$(corp_dns_svc_ip "$CORP_DNS_SECONDARY_NAME")"
-[[ -n "$CORP_DNS_PRIMARY" && -n "$CORP_DNS_SECONDARY" ]] || die "사내 DNS 주소가 비어 있습니다."
-info "결제·배송 서비스의 DNS 서버: 주 ${CORP_DNS_PRIMARY}, 보조 ${CORP_DNS_SECONDARY}"
+DNS_FORWARDER_IP="$(corp_dns_svc_ip "$DNS_FORWARDER_NAME")"
+[[ -n "$CORP_DNS_PRIMARY" && -n "$CORP_DNS_SECONDARY" && -n "$DNS_FORWARDER_IP" ]] || die "사내 DNS·포워더 주소가 비어 있습니다."
+info "결제·배송 서비스의 DNS 서버: 포워더 ${DNS_FORWARDER_IP} → 사내 주 ${CORP_DNS_PRIMARY}, 보조 ${CORP_DNS_SECONDARY}"
 # 예전 버전의 주 DNS 차단 정책이 남아 있으면 지운다
 kc -n "$INFRA_NS" delete netpol allow-corp-dns-primary-from-payment allow-corp-dns-secondary-from-payment allow-corp-dns-from-delivery \
   --ignore-not-found >/dev/null 2>&1 || true
@@ -65,9 +66,10 @@ render "$K/15-redis.yaml" | kc apply -f -
 render "$K/20-services.yaml" | kc apply -f -
 render "$K/30-delivery.yaml" | kc apply -f -
 
-info "방화벽 (배송 서비스 egress: 사내 주 DNS + ${COURIER_IP}:443 만 허용 — 보조 DNS 는 등록 누락)"
+info "방화벽 (DNS 포워더 → 사내 주 DNS 만 허용 — 보조 DNS 는 등록 누락 / 배송 → 포워더·${COURIER_IP}:443)"
 # 이전 버전·이전 테이크의 방화벽 규칙(택배사 새 IP, 보조 DNS 허용 등)을 지우고 기본 상태로 다시 만든다
 kc -n "$APP_NS" delete netpol -l "$FW_LABEL" --ignore-not-found >/dev/null
+kc -n "$INFRA_NS" delete netpol -l "$FW_LABEL" --ignore-not-found >/dev/null
 render "$K/50-firewall.yaml" | kc apply -f -
 
 info "서비스 간 인바운드 격리 (필요한 호출 경로만 허용)"

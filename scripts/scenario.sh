@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # 사건 시나리오 전환 스크립트 — 시나리오 2개
 #
-# ① 주 DNS 장애 → 보조 DNS 가 방화벽에 막힘 (배송 서비스 → 외부 택배사)
-#   baseline   정상 상태   주·보조 DNS 모두 기동, 방화벽: 배송 → 주 DNS·택배사만 허용 (보조 DNS 는 등록 누락)
-#   incident   사건 발생   주 DNS 파드(ns1-corp-dns-0) 삭제(replica=0) → OS 리졸버가 보조 DNS(ns2) 로 (타임아웃 2초)
-#                          → 배송 서비스는 방화벽에 막혀 도메인을 못 찾음, 결제 서비스는 보조 DNS 로 정상
+# ① 주 DNS 장애 → 보조 DNS 가 방화벽에 막힘 (배송·결제 → 외부 택배사·PG)
+#   결제·배송 파드 → DNS 포워더(dns-forwarder) → 사내 주 DNS(ns1) → 실패하면 보조 DNS(ns2)
+#   baseline   정상 상태   주·보조 DNS·포워더 기동, 방화벽: 포워더 → 주 DNS 만 허용 (보조 DNS 는 등록 누락)
+#   incident   사건 발생   주 DNS 파드(ns1-corp-dns-0) 삭제(replica=0) → 포워더가 보조 DNS 로 넘어가지만 방화벽에 막혀 타임아웃
+#                          → 택배사·PG 도메인 조회 실패: 배송 조회·체크아웃 모두 실패
+#                          포워더 로그: read udp <포워더>-><주 DNS IP>:53: i/o timeout → ...-><보조 DNS IP>:53: i/o timeout
 #   firewall   방화벽 규칙 목록 (원인 확인 장면: 주 DNS 만 있고 보조 DNS 가 없음)
-#   fix        해결        방화벽에 보조 DNS 허용 규칙 추가 → 주 DNS 가 죽은 채로 회복
+#   fix        해결        방화벽에 포워더 → 보조 DNS 허용 규칙 추가 → 주 DNS 가 죽은 채로 회복
 #   reset      baseline 과 같음 (다음 촬영 준비: 보조 DNS 규칙 삭제, 주 DNS 다시 기동)
-#   status     사내 DNS 파드·배송 파드의 DNS 조회와 연결·방화벽 규칙·배송 조회 1건
+#   status     DNS 파드·포워더 최근 오류(어느 IP 로 질의했다 실패했는지)·방화벽 규칙·배송 조회·체크아웃 1건씩
 #
 # ② DNS 이름 변경 → 없는 이름 조회 (결제 서비스 → 외부 PG사)
 #   pg-missing   PG사가 새 도메인으로 이전 → 결제 서비스는 새 도메인으로 배포됐지만 사내 DNS 에 등록 누락
@@ -50,26 +52,24 @@ tracking() { call_gateway "$1" GET /api/orders/1001/tracking; }
 
 # ── ① 주 DNS 장애 → 보조 DNS 방화벽 차단 ─────────────────────
 allow_secondary_dns() {
-  info "방화벽: 배송 → 사내 보조 DNS(${CORP_DNS_SECONDARY_NAME}) 허용 규칙 추가 (${SECONDARY_RULE})"
+  info "방화벽: DNS 포워더 → 사내 보조 DNS(${CORP_DNS_SECONDARY_NAME}) 허용 규칙 추가 (${SECONDARY_RULE})"
   kc apply -f - <<YAML
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: ${SECONDARY_RULE}
-  namespace: ${APP_NS}
+  namespace: ${INFRA_NS}
   labels:
     demo.observ/firewall: egress
   annotations:
-    demo.observ/description: "사내 보조 DNS (${CORP_DNS_SECONDARY_NAME}) 53 허용"
+    demo.observ/description: "DNS 포워더 → 사내 보조 DNS (${CORP_DNS_SECONDARY_NAME} ${CORP_DNS_SECONDARY}) 53 허용"
 spec:
   podSelector:
-    matchLabels: { app: delivery-service }
+    matchLabels: { app: ${DNS_FORWARDER_NAME} }
   policyTypes: [Egress]
   egress:
     - to:
-        - namespaceSelector:
-            matchLabels: { kubernetes.io/metadata.name: ${INFRA_NS} }
-          podSelector:
+        - podSelector:
             matchLabels: { app: corp-dns, dns-role: secondary }
       ports:
         - { protocol: UDP, port: 1053 }
@@ -78,22 +78,32 @@ YAML
 }
 
 remove_secondary_dns() {
-  kc -n "$APP_NS" delete netpol "$SECONDARY_RULE" --ignore-not-found >/dev/null
+  kc -n "$INFRA_NS" delete netpol "$SECONDARY_RULE" --ignore-not-found >/dev/null
+  kc -n "$APP_NS" delete netpol "$SECONDARY_RULE" --ignore-not-found >/dev/null   # 이전 버전(배송 → 보조 DNS) 규칙
   info "방화벽: 보조 DNS 허용 규칙 제거 (방화벽 신청 때 누락된 상태)"
 }
 
 show_firewall() {
-  kc -n "$APP_NS" get netpol -l "$FW_LABEL" \
-    -o custom-columns='RULE:.metadata.name,DESCRIPTION:.metadata.annotations.demo\.observ/description'
+  kc get netpol -A -l "$FW_LABEL" \
+    -o custom-columns='NAMESPACE:.metadata.namespace,RULE:.metadata.name,DESCRIPTION:.metadata.annotations.demo\.observ/description'
+}
+
+# forwarder_errors : 포워더 로그의 최근 실패 — 어느 사내 DNS IP 로 질의했다가 실패했는지 (IP 옆에 서버 이름을 붙임)
+forwarder_errors() {
+  kc -n "$INFRA_NS" logs "statefulset/$DNS_FORWARDER_NAME" --since=2m 2>/dev/null | grep 'plugin/errors' | tail -n "${1:-4}" \
+    | sed -e "s#->${CORP_DNS_PRIMARY}:53#->${CORP_DNS_PRIMARY}:53(${CORP_DNS_PRIMARY_NAME} 주)#" \
+          -e "s#->${CORP_DNS_SECONDARY}:53#->${CORP_DNS_SECONDARY}:53(${CORP_DNS_SECONDARY_NAME} 보조)#" \
+          -e 's/^/  /'
 }
 
 status() {
-  info "사내 DNS 파드"
-  kc -n "$INFRA_NS" get pods -l app=corp-dns -o custom-columns='POD:.metadata.name,ROLE:.metadata.labels.dns-role,STATUS:.status.phase' 2>/dev/null
+  info "DNS 파드 (포워더 ${DNS_FORWARDER_IP:-?} → 주 ${CORP_DNS_PRIMARY:-?}, 보조 ${CORP_DNS_SECONDARY:-?})"
+  kc -n "$INFRA_NS" get pods -l "app in (corp-dns,${DNS_FORWARDER_NAME})" \
+    -o custom-columns='POD:.metadata.name,ROLE:.metadata.labels.dns-role,STATUS:.status.phase' 2>/dev/null
   [[ "$(kc -n "$INFRA_NS" get statefulset "$CORP_DNS_PRIMARY_NAME" -o jsonpath='{.spec.replicas}' 2>/dev/null)" == 0 ]] \
     && warn "주 DNS 파드 없음 (incident 상태)"
 
-  info "배송 서비스 파드에서 택배사 도메인 조회와 443 연결 (OS 리졸버 — 주 → 보조 DNS)"
+  info "배송 서비스 파드에서 택배사 도메인 조회와 443 연결 (OS 리졸버 → 포워더)"
   kc -n "$APP_NS" exec deploy/delivery-service -- python -c "
 import socket, time
 host='${COURIER_DOMAIN}'
@@ -109,12 +119,16 @@ except OSError as e:
     print(f'  TCP  {ip}:443 연결 실패 ({e})')
 " || warn "delivery-service exec 실패"
 
+  info "DNS 포워더 최근 오류 (2분) — 어느 사내 DNS 로 질의했다가 실패했는지"
+  local errs; errs="$(forwarder_errors 4)"
+  if [[ -n "$errs" ]]; then echo "$errs"; else echo "  없음"; fi
+
   info "방화벽 규칙"
   show_firewall
 
   info "게이트웨이 → 주문 → 배송을 거친 배송 조회 1건"
   tracking status-check
-  info "체크아웃 1건 (결제 서비스는 방화벽이 없어 보조 DNS 로 정상)"
+  info "게이트웨이 → 주문 → 결제 → PG 를 거친 체크아웃 1건"
   checkout status-checkout
 }
 
@@ -142,16 +156,17 @@ case "${1:-}" in
   baseline|reset)
     remove_secondary_dns
     corpdns primary-up
-    ok "정상 상태: 주·보조 DNS 기동, 방화벽 → 주 DNS·택배사(${COURIER_IP}:443) 허용 (보조 DNS 는 등록 누락)"
+    ok "정상 상태: 주·보조 DNS·포워더 기동, 방화벽: 포워더 → 주 DNS 만 허용 (보조 DNS 는 등록 누락)"
     ;;
   incident)
     remove_secondary_dns
     corpdns primary-down
-    ok "사건 발생: 주 DNS 장애 → 보조 DNS 로 넘어가지만 배송 서비스는 방화벽에 막혀 택배사 도메인을 못 찾음 (배송 조회 실패)"
+    ok "사건 발생: 주 DNS 장애 → 포워더가 보조 DNS 로 넘어가지만 방화벽에 막힘 → 택배사·PG 도메인 조회 실패 (배송 조회·체크아웃 실패)"
+    ok "원인 로그: ./demo.sh corpdns logs forwarder  (read udp …-><사내 DNS IP>:53: i/o timeout)"
     ;;
   fix)
     allow_secondary_dns
-    ok "해결: 방화벽에 보조 DNS 허용 추가 — 주 DNS 가 죽은 채로도 배송 조회 회복 (조회마다 주 DNS 타임아웃만큼 느림)"
+    ok "해결: 방화벽에 보조 DNS 허용 추가 — 주 DNS 가 죽은 채로도 회복 (포워더가 주 DNS 를 비정상으로 보고 보조 DNS 로 바로 보냄)"
     ;;
   status)   status ;;
   firewall) show_firewall ;;
@@ -178,7 +193,7 @@ case "${1:-}" in
 
   traffic)  kc -n "$INFRA_NS" logs -f deploy/loadgen --tail=20 ;;
   *)
-    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
     ;;
 esac

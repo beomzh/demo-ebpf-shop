@@ -325,16 +325,16 @@ spec:
       securityContext:
         runAsNonRoot: true
         seccompProfile: { type: RuntimeDefault }
-      # 이 파드의 DNS 서버 = 사내 DNS 주·보조 (demo-infra 의 ns1/ns2-corp-dns). 앱은 평범하게 OS 리졸버를 쓴다
-      #   - 주 DNS 가 없으면 OS 리졸버가 보조 DNS 로 넘어간다 (timeout 2초, attempts 1)
-      #   - 사내 DNS 는 cluster.local 을 클러스터 DNS 로 전달하므로 회원 서비스(FQDN)도 조회된다
+      # 이 파드의 DNS 서버 = DNS 포워더(demo-infra/dns-forwarder). 앱은 평범하게 OS 리졸버를 쓴다
+      #   - 포워더가 PG 도메인은 사내 DNS(주 → 보조)로, cluster.local(회원 서비스 FQDN)은 클러스터 DNS 로 전달한다
+      #   - timeout 3초, attempts 1 → 사내 DNS 가 모두 응답하지 않으면 약 3초 뒤 실패 (주문의 결제 호출 제한 6초 안)
       #   - ndots:1 + search 없음 → PG 도메인을 한 번만 조회 (search 접미사를 붙인 불필요한 NXDOMAIN 없음)
       dnsPolicy: None
       dnsConfig:
-        nameservers: ["__CORP_DNS_PRIMARY__", "__CORP_DNS_SECONDARY__"]
+        nameservers: ["__DNS_FORWARDER_IP__"]
         options:
           - { name: ndots, value: "1" }
-          - { name: timeout, value: "2" }
+          - { name: timeout, value: "3" }
           - { name: attempts, value: "1" }
       containers:
         - name: payment-service

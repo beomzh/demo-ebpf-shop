@@ -17,12 +17,12 @@ usage() {
   deploy           클러스터에 배포 (정상 상태로 시작)
   security         배포 후 보안 점검 (SCC·securityContext·네트워크 정책)
 
-[시나리오 ① 주 DNS 장애 → 보조 DNS 가 방화벽에 막힘 — 배송 서비스 → 외부 택배사]
-  status           현재 상태 (사내 DNS 파드·배송 파드의 DNS 조회와 연결·방화벽 규칙·배송 조회·체크아웃 1건씩)
-  incident         사건: 주 DNS 파드(ns1-corp-dns-0) 삭제(replica=0) → 보조 DNS(ns2)로 넘어가지만 (os resolv 타임아웃 2초)
-                   배송 서비스는 방화벽에 보조 DNS 가 없어 택배사 도메인을 못 찾음
-  firewall         방화벽 규칙 목록 (원인 확인: 주 DNS 만 허용, 보조 DNS 없음)
-  fix              해결: 방화벽에 보조 DNS 허용
+[시나리오 ① 주 DNS 장애 → 보조 DNS 가 방화벽에 막힘 — 결제·배송 → DNS 포워더 → 사내 DNS]
+  status           현재 상태 (DNS 파드·포워더 최근 오류(실패한 사내 DNS IP)·방화벽 규칙·배송 조회·체크아웃 1건씩)
+  incident         사건: 주 DNS 파드(ns1-corp-dns-0) 삭제(replica=0) → 포워더가 보조 DNS(ns2)로 넘어가지만 방화벽에 막혀 타임아웃
+                   → 택배사·PG 도메인 조회 실패 (배송 조회·체크아웃 실패)
+  firewall         방화벽 규칙 목록 (원인 확인: 포워더 → 주 DNS 만 허용, 보조 DNS 없음)
+  fix              해결: 방화벽에 포워더 → 보조 DNS 허용
   reset            다음 테이크 준비 (보조 DNS 규칙 삭제, 주 DNS 다시 기동). baseline 과 같음
   traffic          부하 발생기 로그 실시간 보기 (Ctrl+C 로 종료)
 
@@ -33,7 +33,7 @@ usage() {
   pg-status        사내 DNS 서버별 조회 + 체크아웃 1건
 
 [사내 DNS]
-  corpdns <명령>   status | logs [primary|secondary|all] | records | record-add [도메인] [IP] | record-remove [도메인]
+  corpdns <명령>   status | logs [forwarder|primary|secondary|all] | records | record-add [도메인] [IP] | record-remove [도메인]
                    | primary-down | primary-up | up | down
 
 [유지보수]

@@ -1,15 +1,77 @@
-# "사내 방화벽" — 배송 서비스의 외부 나가는 연결(egress) 허용 목록.
-# OpenShift OVN-Kubernetes, Calico(Canal), Cilium 등 NetworkPolicy 를 집행하는 CNI 가 필요하다.
-# 허용되지 않은 목적지로 가는 패킷은 조용히 버려진다(drop) → 응답 없이 타임아웃.
+# "사내 방화벽" — 나가는 연결(egress) 허용 목록. NetworkPolicy 를 집행하는 CNI 가 필요하다
+# (OpenShift OVN-Kubernetes, RKE2 Canal, Calico, Cilium 등). 허용되지 않은 목적지로 가는 패킷은 조용히 버려진다(drop).
 #
-# 규칙 목록 보기:  ./demo.sh firewall   (= kubectl -n demo-shop get netpol -l demo.observ/firewall=egress)
+# 규칙 목록 보기:  ./demo.sh firewall   (= kubectl get netpol -A -l demo.observ/firewall=egress)
 #
-# 시나리오 1 의 핵심: 방화벽 신청 때 사내 DNS 는 "주 DNS" 만 등록했다. 보조 DNS 는 빠져 있다.
-#   평소에는 주 DNS 가 답하므로 아무 문제 없다 → 주 DNS 가 죽으면 OS 리졸버가 보조 DNS 로 넘어가는데 방화벽이 막는다.
+# 시나리오 1 의 핵심: DNS 포워더 → 사내 DNS 방화벽 신청 때 "주 DNS" 만 등록했다. 보조 DNS 는 빠져 있다.
+#   평소에는 주 DNS 가 답하므로 아무 문제 없다 → 주 DNS 가 죽으면 포워더가 보조 DNS 로 넘어가는데 방화벽이 막는다.
+#   → 포워더 로그: read udp <포워더>-><보조 DNS IP>:53: i/o timeout
 #   해결(./demo.sh fix) = 보조 DNS 허용 규칙(fw-allow-corp-dns-secondary) 추가.
-# 사내 DNS 는 Service 53 → 파드 1053 으로 DNAT 되므로 파드 포트 1053 을 허용한다.
+# 사내 DNS·포워더는 Service 53 → 파드 1053 으로 DNAT 되므로 파드 포트 1053 을 허용한다.
 
-# 1) 기본 규칙: 아래 허용 규칙 외에는 배송 서비스의 나가는 연결을 모두 차단
+# ── demo-infra: DNS 포워더의 나가는 연결 ─────────────────────────
+# 1) 기본 규칙: 아래 허용 규칙 외에는 모두 차단
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fw-dns-forwarder-default
+  namespace: demo-infra
+  labels:
+    demo.observ/firewall: egress
+  annotations:
+    demo.observ/description: "DNS 포워더 egress 기본 규칙: 허용 목록 외 모두 차단"
+spec:
+  podSelector:
+    matchLabels: { app: dns-forwarder }
+  policyTypes: [Egress]
+---
+# 2) 사내 주 DNS 허용 (보조 DNS 는 등록 누락)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fw-allow-corp-dns-primary
+  namespace: demo-infra
+  labels:
+    demo.observ/firewall: egress
+  annotations:
+    demo.observ/description: "DNS 포워더 → 사내 주 DNS (ns1-corp-dns __CORP_DNS_PRIMARY__) 53 허용"
+spec:
+  podSelector:
+    matchLabels: { app: dns-forwarder }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: { app: corp-dns, dns-role: primary }
+      ports:
+        - { protocol: UDP, port: 1053 }
+        - { protocol: TCP, port: 1053 }
+---
+# 3) 클러스터 DNS 허용 (cluster.local — 결제 서비스 → 회원 서비스). OCP 는 파드 포트 5353, 그 밖은 53
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fw-allow-cluster-dns
+  namespace: demo-infra
+  labels:
+    demo.observ/firewall: egress
+  annotations:
+    demo.observ/description: "DNS 포워더 → 클러스터 DNS (cluster.local) 허용"
+spec:
+  podSelector:
+    matchLabels: { app: dns-forwarder }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+        - { protocol: UDP, port: 5353 }
+        - { protocol: TCP, port: 5353 }
+---
+# ── demo-shop: 배송 서비스의 나가는 연결 ─────────────────────────
+# 4) 기본 규칙: 아래 허용 규칙 외에는 모두 차단
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -24,16 +86,16 @@ spec:
     matchLabels: { app: delivery-service }
   policyTypes: [Egress]
 ---
-# 2) 사내 주 DNS 허용 (보조 DNS 는 등록 누락)
+# 5) DNS 포워더 허용
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: fw-allow-corp-dns-primary
+  name: fw-allow-dns-forwarder
   namespace: demo-shop
   labels:
     demo.observ/firewall: egress
   annotations:
-    demo.observ/description: "사내 주 DNS (ns1-corp-dns) 53 허용"
+    demo.observ/description: "배송 서비스 → DNS 포워더 53 허용"
 spec:
   podSelector:
     matchLabels: { app: delivery-service }
@@ -43,12 +105,12 @@ spec:
         - namespaceSelector:
             matchLabels: { kubernetes.io/metadata.name: demo-infra }
           podSelector:
-            matchLabels: { app: corp-dns, dns-role: primary }
+            matchLabels: { app: dns-forwarder }
       ports:
         - { protocol: UDP, port: 1053 }
         - { protocol: TCP, port: 1053 }
 ---
-# 3) 택배사 API 허용
+# 6) 택배사 API 허용
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -57,7 +119,7 @@ metadata:
   labels:
     demo.observ/firewall: egress
   annotations:
-    demo.observ/description: "택배사 API (__COURIER_DOMAIN__) __COURIER_IP__:443 허용"
+    demo.observ/description: "배송 서비스 → 택배사 API (__COURIER_DOMAIN__) __COURIER_IP__:443 허용"
 spec:
   podSelector:
     matchLabels: { app: delivery-service }

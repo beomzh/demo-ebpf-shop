@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# 사내 DNS(주·보조) 조작 — demo-infra 네임스페이스의 파드  ns1-corp-dns-0 (주), ns2-corp-dns-0 (보조)
+# 사내 DNS(주·보조)와 DNS 포워더 조작 — demo-infra 네임스페이스의 파드
+#   ns1-corp-dns-0 (사내 주 DNS), ns2-corp-dns-0 (사내 보조 DNS), dns-forwarder-0 (결제·배송 파드의 DNS 서버 → 주 → 보조로 전달)
 #
-#   up                        주·보조 DNS 배포 (deploy 가 자동으로 함)
+#   up                        주·보조 DNS 와 포워더 배포 (deploy 가 자동으로 함)
 #   down                      삭제
 #   status                    파드·서비스 IP·레코드
-#   logs [primary|secondary|all]   질의 로그 (기본 all: 두 서버를 한 화면에 → 주 → 보조 전환 확인)
+#   logs [forwarder|primary|secondary|all]   질의 로그 (기본 all: 세 서버를 한 화면에)
+#                             forwarder 의 [ERROR] 줄에 "어느 사내 DNS IP 로 질의했다가 실패했는지"가 나온다
 #   records                   등록된 레코드 목록
 #   record-add [도메인] [IP]  레코드 등록·변경 (기본: PG_DOMAIN → PG_IP)
 #   record-remove [도메인]    레코드 삭제 → NXDOMAIN (기본: PG_DOMAIN)
@@ -47,6 +49,17 @@ corp_up() {
   kc -n "$INFRA_NS" rollout status "statefulset/$P" --timeout=120s >/dev/null
   kc -n "$INFRA_NS" rollout status "statefulset/$S2" --timeout=120s >/dev/null
   ok "사내 DNS: 주 ${P} ${CORP_DNS_PRIMARY}, 보조 ${S2} ${CORP_DNS_SECONDARY}"
+  forwarder_up
+}
+
+# DNS 포워더: 사내 DNS 주소(ClusterIP)를 넣어 배포한다. 주소가 바뀌면 파드 annotation 이 바뀌어 재시작된다
+forwarder_up() {
+  info "DNS 포워더 배포 (${DNS_FORWARDER_NAME} → 주 ${CORP_DNS_PRIMARY}, 보조 ${CORP_DNS_SECONDARY})"
+  render "$ROOT/k8s/47-dns-forwarder.yaml" | kc apply -f - >/dev/null
+  kc -n "$INFRA_NS" rollout status "statefulset/$DNS_FORWARDER_NAME" --timeout=120s >/dev/null
+  DNS_FORWARDER_IP="$(corp_dns_svc_ip "$DNS_FORWARDER_NAME")"
+  [[ -n "$DNS_FORWARDER_IP" ]] || die "DNS 포워더 ClusterIP 를 가져오지 못했습니다."
+  ok "DNS 포워더: ${DNS_FORWARDER_NAME} ${DNS_FORWARDER_IP}"
 }
 
 # wait_zone <도메인> <present|absent|IP> : 응답하는 서버가 모두 기대한 결과를 낼 때까지 기다린다 (주 DNS 가 없으면 그 서버는 건너뜀)
@@ -87,12 +100,15 @@ case "$cmd" in
     kc -n "$INFRA_NS" delete svc "$P" "$S2" --ignore-not-found >/dev/null
     kc -n "$INFRA_NS" delete configmap corp-dns-corefile corp-dns-zone --ignore-not-found >/dev/null
     kc -n "$INFRA_NS" delete netpol allow-corp-dns-from-clients --ignore-not-found >/dev/null
-    ok "사내 DNS 파드 삭제 (결제·배송 서비스는 다시 deploy 해야 새 주소를 받습니다)"
+    kc -n "$INFRA_NS" delete statefulset,svc "$DNS_FORWARDER_NAME" --ignore-not-found >/dev/null
+    kc -n "$INFRA_NS" delete configmap dns-forwarder-corefile --ignore-not-found >/dev/null
+    kc -n "$INFRA_NS" delete netpol allow-dns-forwarder-from-clients --ignore-not-found >/dev/null
+    ok "사내 DNS·포워더 파드 삭제 (결제·배송 서비스는 다시 deploy 해야 새 주소를 받습니다)"
     ;;
   status)
-    kc -n "$INFRA_NS" get pods -l app=corp-dns \
+    kc -n "$INFRA_NS" get pods -l 'app in (corp-dns,dns-forwarder)' \
       -o custom-columns='POD:.metadata.name,ROLE:.metadata.labels.dns-role,STATUS:.status.phase,POD-IP:.status.podIP,NODE:.spec.nodeName'
-    echo "서비스: 주 ${P} ${CORP_DNS_PRIMARY:-없음}, 보조 ${S2} ${CORP_DNS_SECONDARY:-없음}"
+    echo "서비스: 포워더 ${DNS_FORWARDER_NAME} ${DNS_FORWARDER_IP:-없음} → 주 ${P} ${CORP_DNS_PRIMARY:-없음}, 보조 ${S2} ${CORP_DNS_SECONDARY:-없음}"
     if [[ "$(primary_replicas)" == 0 ]]; then echo "주 DNS: 파드 없음 (primary-down) — 보조 DNS 가 응답 중"; fi
     echo "등록된 레코드:"
     corp_records | sed '/^$/d; s/^/  /; s/ \([0-9.]*\)$/ → \1/'
@@ -101,8 +117,9 @@ case "$cmd" in
     case "${arg:-all}" in
       primary)   kc -n "$INFRA_NS" logs -f "statefulset/$P" --tail=20 ;;
       secondary) kc -n "$INFRA_NS" logs -f "statefulset/$S2" --tail=20 ;;
-      all)       kc -n "$INFRA_NS" logs -f -l app=corp-dns --prefix --max-log-requests=2 --tail=10 ;;
-      *) die "logs [primary|secondary|all]" ;;
+      forwarder) kc -n "$INFRA_NS" logs -f "statefulset/$DNS_FORWARDER_NAME" --tail=20 ;;
+      all)       kc -n "$INFRA_NS" logs -f -l 'app in (corp-dns,dns-forwarder)' --prefix --max-log-requests=3 --tail=10 ;;
+      *) die "logs [forwarder|primary|secondary|all]" ;;
     esac
     ;;
   records) corp_records | sed '/^$/d; s/ / → /' ;;
@@ -129,7 +146,7 @@ case "$cmd" in
     ok "주 DNS 파드(${P}-0) 다시 기동"
     ;;
   *)
-    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
     ;;
 esac

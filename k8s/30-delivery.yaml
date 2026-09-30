@@ -1,9 +1,9 @@
 # 배송 서비스 (Python) — 모니터링이 전혀 없는 서비스.
 # 택배사 도메인은 사내 DNS(주·보조)에 등록된 A 레코드 "IP 1개"로 조회한다 (dnsPolicy: None).
-#   - 배송 서비스가 쓰는 DNS 는 사내 DNS 뿐이다 (택배사 외에는 이름 조회를 하지 않음. 방화벽도 DNS·택배사만 허용)
+#   - 이 파드의 DNS 서버 = DNS 포워더(demo-infra/dns-forwarder) → 사내 DNS 주 → 보조 순서로 전달
 #   - ndots:1 + search 없음 → api.courier.example 을 바로 조회해 NXDOMAIN 이 0 으로 유지된다.
-#   - 주 DNS 가 없으면 OS 리졸버가 보조 DNS 로 넘어간다 (timeout 2초, attempts 1 — 결제 서비스와 같은 기준)
-#   - __CORP_DNS_PRIMARY__/SECONDARY 는 scripts/deploy.sh 가 ns1/ns2-corp-dns 서비스의 ClusterIP 로 채운다
+#   - timeout 3초, attempts 1 (결제 서비스와 같은 기준)
+#   - __DNS_FORWARDER_IP__ 는 scripts/deploy.sh 가 dns-forwarder 서비스의 ClusterIP 로 채운다
 # 택배사 TLS 인증서는 courier-ca 시크릿의 사설 CA 로 검증한다 (시크릿이 없으면 기동하지 않음).
 apiVersion: apps/v1
 kind: Deployment
@@ -28,10 +28,10 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       dnsPolicy: None
       dnsConfig:
-        nameservers: ["__CORP_DNS_PRIMARY__", "__CORP_DNS_SECONDARY__"]
+        nameservers: ["__DNS_FORWARDER_IP__"]
         options:
           - { name: ndots, value: "1" }
-          - { name: timeout, value: "2" }
+          - { name: timeout, value: "3" }
           - { name: attempts, value: "1" }
       containers:
         - name: delivery-service
