@@ -8,9 +8,12 @@ declare(strict_types=1);
 
 $memberUrl = getenv('MEMBER_URL') ?: 'http://member-service:8080';
 
-function logmsg(string $level, string $msg): void
+// 로그는 한 줄짜리 JSON: {ts, level, service, msg, ...필드}
+function logmsg(string $level, string $msg, array $fields = []): void
 {
-    file_put_contents('php://stderr', date('Y-m-d\TH:i:s') . " $level notification-service $msg\n");
+    $entry = ['ts' => gmdate('Y-m-d\TH:i:s') . sprintf('.%03dZ', (int)(fmod(microtime(true), 1) * 1000)),
+              'level' => $level, 'service' => 'notification-service', 'msg' => $msg] + array_filter($fields, fn($v) => $v !== null);
+    file_put_contents('php://stderr', json_encode($entry, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n");
 }
 
 function respond(int $status, array $body): never
@@ -75,16 +78,19 @@ if ($method === 'POST' && $path === '/notifications') {
     if ($status !== 200) {
         $ms = (int)((microtime(true) - $started) * 1000);
         $path = error_path('member-service', $status, $resp, "$resp after {$ms}ms");
-        logmsg($status === 0 ? 'ERROR' : 'WARN', sprintf(
-            'upstream call failed req=%s target=member-service call="GET %s" status=%d elapsedMs=%d order=%d path="%s"',
-            $reqId, $url, $status, $ms, $orderId, $path));
+        logmsg($status === 0 ? 'ERROR' : 'WARN', 'upstream call failed', [
+            'req' => $reqId, 'target' => 'member-service', 'call' => "GET $url", 'status' => $status,
+            'elapsedMs' => $ms, 'orderId' => $orderId, 'path' => $path, 'error' => $status === 0 ? $resp : null,
+        ]);
         respond($status === 0 ? 504 : 502, ['error' => 'member-service call failed', 'errorPath' => $path]);
     }
 
     $member = json_decode($resp, true) ?: [];
     $channel = ($member['grade'] ?? '') === 'VIP' ? 'sms' : 'email';
-    logmsg('INFO', sprintf('notified req=%s order=%d member=%s channel=%s elapsedMs=%d', $reqId, $orderId, $member['name'] ?? $memberId, $channel,
-        (int)((microtime(true) - $started) * 1000)));
+    logmsg('INFO', 'notified', [
+        'req' => $reqId, 'orderId' => $orderId, 'member' => $member['name'] ?? $memberId, 'channel' => $channel,
+        'elapsedMs' => (int)((microtime(true) - $started) * 1000),
+    ]);
     respond(202, ['notificationId' => bin2hex(random_bytes(8)), 'orderId' => $orderId, 'channel' => $channel]);
 }
 

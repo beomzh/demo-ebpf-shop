@@ -93,7 +93,7 @@ fw-delivery-default             배송 서비스 egress 기본 규칙: 사내 DN
 | --- | --- | --- | --- | --- |
 | 0 | `./demo.sh pg-status` | | 주·보조 DNS 모두 PG IP, 체크아웃 201 | 결제 서비스는 사내 DNS 로 PG 도메인을 찾아 승인을 요청한다 |
 | 1 | `./demo.sh pg-missing` | 결제 서비스 상세 → DNS 탭, 체크아웃 오류율 | 새 PG 도메인(`api-new…`) 조회의 **NXDOMAIN** 증가 | PG사 도메인 이전 후 결제가 전부 실패 — 코드가 아니라 사내 DNS 등록 누락 |
-| 2 | (터미널) `oc -n demo-shop logs deploy/payment-service --since=1m \| grep -A1 "upstream call failed" \| tail -2` | 결제 서비스 로그 | `Error: getaddrinfo ENOTFOUND api-new.pg.example` | 앱은 "이름을 찾지 못했다"는 예외만 남긴다 — 원인은 eBPF DNS 탭이 먼저 보여줬다 |
+| 2 | (터미널) `oc -n demo-shop logs deploy/payment-service --since=1m \| jq -r 'select(.msg=="upstream call failed") \| .error' \| tail -1` | 결제 서비스 로그 | `Error: getaddrinfo ENOTFOUND api-new.pg.example` | 앱은 "이름을 찾지 못했다"는 예외만 남긴다 — 원인은 eBPF DNS 탭이 먼저 보여줬다 |
 | 3 | `./demo.sh pg-register` | DNS 탭, 체크아웃 | NXDOMAIN 멈춤, 체크아웃 201 | 사내 DNS 에 한 줄 등록하자 **앱 재시작 없이** 회복 |
 | 4 | `./demo.sh pg-reset` | | 원래 상태 | 다음 테이크 준비 |
 

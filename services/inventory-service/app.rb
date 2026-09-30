@@ -16,8 +16,12 @@ REDIS_PASSWORD = ENV.fetch('REDIS_PASSWORD', '')
 INITIAL_STOCK = 1000
 
 $stdout.sync = true
+# 로그는 한 줄짜리 JSON: {ts, level, service, msg, ...필드}. LOG.info(['메시지', {필드}]) 처럼 배열로 넘긴다
 LOG = Logger.new($stdout)
-LOG.formatter = proc { |sev, time, _, msg| "#{time.strftime('%Y-%m-%dT%H:%M:%S')} #{sev} inventory-service #{msg}\n" }
+LOG.formatter = proc do |sev, time, _, (msg, fields)|
+  JSON.generate({ ts: time.utc.strftime('%Y-%m-%dT%H:%M:%S.%LZ'), level: sev, service: 'inventory-service', msg: msg }
+                  .merge(fields || {})) + "\n"
+end
 
 # 최소 Redis 클라이언트: 요청 스레드마다 연결 1개를 재사용하고, 끊기면 한 번 다시 연결한다.
 module MiniRedis
@@ -102,7 +106,7 @@ server.mount_proc('/inventory') do |req, res|
     if req.request_method == 'GET' && (m = %r{\A/inventory/(\d+)\z}.match(req.path))
       id = m[1]
       stock = current_stock(id)
-      LOG.info("stock ok req=#{req_id} product=#{id} stock=#{stock} elapsedMs=#{elapsed_ms.call}")
+      LOG.info(['stock ok', { req: req_id, productId: Integer(id), stock: stock, elapsedMs: elapsed_ms.call }])
       json(res, 200, productId: Integer(id), stock: stock)
     elsif req.request_method == 'POST' && (m = %r{\A/inventory/(\d+)/reserve\z}.match(req.path))
       id = m[1]
@@ -111,9 +115,9 @@ server.mount_proc('/inventory') do |req, res|
       if remaining.negative?
         # 데모가 멈추지 않도록 재고가 바닥나면 다시 채운다
         remaining = MiniRedis.call('INCRBY', stock_key(id), INITIAL_STOCK)
-        LOG.info("restocked req=#{req_id} product=#{id} remaining=#{remaining}")
+        LOG.info(['restocked', { req: req_id, productId: Integer(id), remaining: remaining }])
       end
-      LOG.info("reserve ok req=#{req_id} product=#{id} qty=#{qty} remaining=#{remaining} elapsedMs=#{elapsed_ms.call}")
+      LOG.info(['reserve ok', { req: req_id, productId: Integer(id), qty: qty, remaining: remaining, elapsedMs: elapsed_ms.call }])
       json(res, 200, productId: Integer(id), reserved: qty, remaining: remaining)
     else
       json(res, 404, error: 'not found')
@@ -121,8 +125,10 @@ server.mount_proc('/inventory') do |req, res|
   rescue MiniRedis::Error => e
     # 어디(Redis 어느 주소)를 호출하다 실패했는지 남기고, 위로 errorPath 를 전달한다
     path = "inventory-service → redis(#{REDIS_HOST}:#{REDIS_PORT}) [#{e.message}]"
-    LOG.error("upstream call failed req=#{req_id} target=redis call=\"#{req.request_method} #{req.path}\" path=\"#{path}\"\n" +
-              e.full_message(highlight: false, order: :top))
+    LOG.error(['upstream call failed', {
+      req: req_id, target: 'redis', call: "#{req.request_method} #{req.path}", path: path,
+      error: "#{e.class}: #{e.message}", stack: e.full_message(highlight: false, order: :top)
+    }])
     json(res, 503, error: 'redis call failed', errorPath: path)
   rescue JSON::ParserError, ArgumentError, KeyError
     json(res, 400, error: 'invalid request')
@@ -130,5 +136,5 @@ server.mount_proc('/inventory') do |req, res|
 end
 
 trap('TERM') { server.shutdown }
-LOG.info("listening on :#{PORT} redis=#{REDIS_HOST}:#{REDIS_PORT} auth=#{!REDIS_PASSWORD.empty?}")
+LOG.info(['listening', { port: PORT, redis: "#{REDIS_HOST}:#{REDIS_PORT}", auth: !REDIS_PASSWORD.empty? }])
 server.start

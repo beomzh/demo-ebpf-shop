@@ -10,7 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"math/rand/v2"
 	"net/http"
 	"os"
@@ -107,14 +107,17 @@ func fetchStock(id int, reqID string) (*int, error) {
 	return &body.Stock, nil
 }
 
-// logf : 다른 서비스와 같은 형식 "<시각> <레벨> product-service <메시지>" 로 표준출력에 남긴다
-func logf(level, format string, args ...any) {
-	log.Printf("%s %s product-service %s", time.Now().UTC().Format("2006-01-02T15:04:05"), level, fmt.Sprintf(format, args...))
-}
+// logger : 한 줄짜리 JSON {ts, level, service, msg, ...필드} 로 표준출력에 남긴다 (Go 표준 log/slog)
+var logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+		if a.Key == slog.TimeKey && len(groups) == 0 {
+			return slog.String("ts", a.Value.Time().UTC().Format("2006-01-02T15:04:05.000Z"))
+		}
+		return a
+	},
+})).With("service", "product-service")
 
 func main() {
-	log.SetFlags(0)
-	log.SetOutput(os.Stdout)
 	port := envOr("PORT", "8080")
 
 	mux := http.NewServeMux()
@@ -139,22 +142,26 @@ func main() {
 		}
 		p, ok := products[id]
 		if !ok {
-			logf("INFO", "product not found req=%s id=%d", reqID, id)
+			logger.Info("product not found", "req", reqID, "productId", id)
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 			return
 		}
 		started := time.Now()
 		if stock, err := fetchStock(id, reqID); err != nil {
 			// 재고는 부가 정보라 상품은 그대로 돌려주되, 어디를 호출하다 실패했는지 남긴다
-			logf("WARN", `upstream call failed req=%s target=inventory-service call="GET %s/inventory/%d" elapsedMs=%d path="%s" (재고 없이 응답)`,
-				reqID, inventoryURL, id, time.Since(started).Milliseconds(), errorPath("inventory-service", err))
+			logger.Warn("upstream call failed", "req", reqID, "target", "inventory-service",
+				"call", fmt.Sprintf("GET %s/inventory/%d", inventoryURL, id), "elapsedMs", time.Since(started).Milliseconds(),
+				"path", errorPath("inventory-service", err), "error", err.Error(), "note", "재고 없이 응답")
 		} else {
 			p.Stock = stock
-			logf("INFO", "product ok req=%s id=%d price=%d stock=%d elapsedMs=%d", reqID, id, p.Price, *stock, time.Since(started).Milliseconds())
+			logger.Info("product ok", "req", reqID, "productId", id, "price", p.Price, "stock", *stock, "elapsedMs", time.Since(started).Milliseconds())
 		}
 		writeJSON(w, http.StatusOK, p)
 	})
 
-	logf("INFO", "listening on :%s inventory=%s", port, inventoryURL)
-	log.Fatal(http.ListenAndServe(":"+port, mux))
+	logger.Info("listening", "port", port, "inventory", inventoryURL)
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
+		logger.Error("server stopped", "error", err.Error())
+		os.Exit(1)
+	}
 }

@@ -21,8 +21,9 @@ const PG_DOMAIN = process.env.PG_DOMAIN || 'api.pg.example';
 const PG_CA_FILE = process.env.PG_CA_FILE || '/etc/demo-ca/ca.crt';
 const PG_CA = fs.existsSync(PG_CA_FILE) ? fs.readFileSync(PG_CA_FILE) : undefined;
 
-function log(level, msg) {
-  console.log(`${new Date().toISOString()} ${level} payment-service ${msg}`);
+// 로그는 한 줄짜리 JSON: {ts, level, service, msg, ...필드}. 스택 트레이스도 stack 필드 하나에 담는다
+function log(level, msg, fields = {}) {
+  console.log(JSON.stringify({ ts: new Date().toISOString(), level, service: 'payment-service', msg, ...fields }));
 }
 
 const SERVICE = 'payment-service';
@@ -110,11 +111,11 @@ const server = http.createServer(async (req, res) => {
     try {
       body = JSON.parse(await readBody(req) || '{}');
     } catch (err) {
-      log('WARN', `invalid payment body req=${reqId}: ${err.message}`);
+      log('WARN', 'invalid payment body', { req: reqId, error: err.message });
       return send(res, 400, { error: 'invalid json' });
     }
     if (!body.orderId || !body.memberId || !(body.amount > 0)) {
-      log('WARN', `rejected payment req=${reqId} orderId=${body.orderId} memberId=${body.memberId} amount=${body.amount}`);
+      log('WARN', 'rejected payment', { req: reqId, orderId: body.orderId, memberId: body.memberId, amount: body.amount });
       return send(res, 400, { error: 'orderId, memberId and amount are required' });
     }
 
@@ -122,9 +123,10 @@ const server = http.createServer(async (req, res) => {
     if (member.status !== 200) {
       const path = errorPath('member-service', member);
       const url = `${MEMBER_URL.origin}/members/${body.memberId}`;
-      log(member.status === 0 ? 'ERROR' : 'WARN',
-        `upstream call failed req=${reqId} target=member-service call="GET ${url}" status=${member.status} elapsedMs=${member.ms} orderId=${body.orderId} path="${path}"`
-        + (member.stack ? `\n${member.stack}` : ''));
+      log(member.status === 0 ? 'ERROR' : 'WARN', 'upstream call failed', {
+        req: reqId, target: 'member-service', call: `GET ${url}`, status: member.status, elapsedMs: member.ms,
+        orderId: body.orderId, path, error: member.error, stack: member.stack,
+      });
       return send(res, member.status === 0 ? 504 : 502, { error: 'member-service call failed', errorPath: path });
     }
     const grade = JSON.parse(member.body).grade;
@@ -136,14 +138,17 @@ const server = http.createServer(async (req, res) => {
       const target = `pg(${PG_DOMAIN})`;
       const path = errorPath(target, pg);
       const url = `https://${PG_DOMAIN}/v1/payments/approve`;
-      log(pg.status === 0 ? 'ERROR' : 'WARN',
-        `upstream call failed req=${reqId} target=${target} call="POST ${url}" status=${pg.status} elapsedMs=${pg.ms} orderId=${body.orderId} path="${path}"`
-        + (pg.stack ? `\n${pg.stack}` : ''));
+      log(pg.status === 0 ? 'ERROR' : 'WARN', 'upstream call failed', {
+        req: reqId, target, call: `POST ${url}`, status: pg.status, elapsedMs: pg.ms,
+        orderId: body.orderId, path, error: pg.error, stack: pg.stack,
+      });
       return send(res, pg.status === 0 ? 504 : 502, { error: 'pg call failed', errorPath: path });
     }
 
     const paymentId = crypto.randomUUID();
-    log('INFO', `payment approved req=${reqId} orderId=${body.orderId} paymentId=${paymentId} amount=${body.amount} charged=${charged} grade=${grade} pg=${PG_DOMAIN} memberMs=${member.ms} pgMs=${pg.ms}`);
+    log('INFO', 'payment approved', {
+      req: reqId, orderId: body.orderId, paymentId, amount: body.amount, charged, grade, pg: PG_DOMAIN, memberMs: member.ms, pgMs: pg.ms,
+    });
     send(res, 201, {
       paymentId,
       orderId: body.orderId,
@@ -159,4 +164,4 @@ const server = http.createServer(async (req, res) => {
   send(res, 404, { error: 'not found' });
 });
 
-server.listen(PORT, () => log('INFO', `listening on :${PORT} member=${MEMBER_URL.origin}`));
+server.listen(PORT, () => log('INFO', 'listening', { port: PORT, member: MEMBER_URL.origin, pg: PG_DOMAIN }));

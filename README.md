@@ -162,50 +162,68 @@ loadgen 은 사용자 역할이라 게이트웨이만 호출합니다. 게이트
 - 체크아웃 한 번에 서비스 간 HTTP 호출 8번 + 외부 PG 호출 1번 + DB 쿼리가 일어나, 연결선과 호출 수가 풍부하게 쌓입니다.
 - 프로토콜도 여러 가지입니다: HTTP(서비스 간), MySQL, Redis(RESP), DNS(클러스터 DNS·사내 DNS), HTTPS(배송 → 택배사, 결제 → PG사).
 
-### 정상 처리 로그 (INFO)
+### 로그 형식 — 여덟 서비스 공통 JSON
 
-여덟 서비스 모두 요청을 정상 처리하면 INFO 한 줄을 남깁니다 (요청 ID `req=` 가 같아 한 요청을 서비스별로 따라갈 수 있음). 체크아웃 1건 예:
+여덟 서비스는 모두 **한 줄에 JSON 하나**로 로그를 남깁니다. 언어가 달라도 필드 이름이 같아서, 로그 수집 도구(Loki, Elasticsearch,
+OpenShift 로깅 등)에서 `service`·`req`·`level`·`status` 로 바로 검색·필터할 수 있습니다. 각 언어의 표준 기능만 씁니다 (외부 로깅 라이브러리 없음).
+
+| 필드 | 뜻 |
+| --- | --- |
+| `ts` | 시각 (UTC, 밀리초) |
+| `level` | `INFO` / `WARN` / `ERROR` |
+| `service` | 서비스 이름 (`gateway-service` …) |
+| `msg` | 무슨 일인지 (`checkout ok`, `upstream call failed` …) |
+| `req` | 요청 ID — 같은 요청이면 모든 서비스에서 같은 값 |
+| `elapsedMs`, `status`, `target`, `call`, `path` … | 상황별 필드 |
+| `error`, `stack` | 예외 메시지와 스택 트레이스 (**여러 줄로 쪼개지지 않고 한 필드에**) |
+
+`kubectl logs` 로 볼 때는 `jq` 로 보기 좋게 볼 수 있습니다:
+
+```bash
+oc -n demo-shop logs deploy/payment-service --since=1m | jq -r '[.ts, .level, .msg, .req, (.path // "")] | @tsv'
+oc -n demo-shop logs deploy/delivery-service --since=1m | jq -r 'select(.level=="ERROR") | .stack'    # 스택 트레이스 펼쳐 보기
+```
+
+(알림 서비스(PHP 내장 서버)는 기동할 때 `PHP … Development Server started` 한 줄만 JSON 이 아닙니다. `jq` 로 볼 때는 `jq -R 'fromjson? // empty'` 를 쓰세요.)
+
+**정상 처리 로그 (INFO)** — 요청을 정상 처리하면 서비스마다 한 줄. 체크아웃 1건 예:
 
 ```
-INFO: gateway-service   checkout ok req=lg-… status=201 elapsedMs=111 memberId=10 productId=3 qty=2 price=4000
-INFO  product-service   product ok req=lg-… id=3 price=4000 stock=1000 elapsedMs=1
-INFO  inventory-service stock ok req=lg-… product=3 stock=1000 elapsedMs=1
-INFO  order-service     order created req=lg-… orderId=1001 memberId=10 productId=3 qty=2 amount=8000 memberMs=33 stockMs=3 paymentMs=37 notificationMs=11
-INFO  member-service    member ok req=lg-… id=10 grade=VIP elapsedMs=2
-INFO  inventory-service reserve ok req=lg-… product=3 qty=2 remaining=998 elapsedMs=1
-INFO  payment-service   payment approved req=lg-… orderId=1001 paymentId=… amount=8000 charged=7200 grade=VIP pg=api.pg.example memberMs=12 pgMs=22
-INFO  notification-service notified req=lg-… order=1001 member=member-10 channel=sms elapsedMs=6
+{"ts":"2026-09-30T01:07:19.531Z","level":"INFO","service":"gateway-service","msg":"checkout ok","req":"lg-…","status":201,"elapsedMs":111,"memberId":10,"productId":3,"qty":2,"price":4000}
+{"ts":"…","level":"INFO","service":"product-service","msg":"product ok","req":"lg-…","productId":3,"price":4000,"stock":1000,"elapsedMs":1}
+{"ts":"…","level":"INFO","service":"inventory-service","msg":"stock ok","req":"lg-…","productId":3,"stock":1000,"elapsedMs":1}
+{"ts":"…","level":"INFO","service":"member-service","msg":"member ok","req":"lg-…","memberId":10,"grade":"VIP","elapsedMs":2}
+{"ts":"…","level":"INFO","service":"inventory-service","msg":"reserve ok","req":"lg-…","productId":3,"qty":2,"remaining":998,"elapsedMs":1}
+{"ts":"…","level":"INFO","service":"payment-service","msg":"payment approved","req":"lg-…","orderId":1001,"paymentId":"…","amount":8000,"charged":7200,"grade":"VIP","pg":"api.pg.example","memberMs":12,"pgMs":22}
+{"ts":"…","level":"INFO","service":"notification-service","msg":"notified","req":"lg-…","orderId":1001,"member":"member-10","channel":"sms","elapsedMs":6}
+{"ts":"…","level":"INFO","service":"order-service","msg":"order created","req":"lg-…","orderId":1001,"memberId":10,"productId":3,"qty":2,"amount":8000,"memberMs":33,"stockMs":3,"paymentMs":37,"notificationMs":11}
 ```
 
 배송 조회는 `gateway-service tracking ok` → `order-service tracking ok` → `delivery-service tracking ok` 순서로 남습니다.
 
 ### 애플리케이션 로그로 실패 지점 찾기
 
-모든 서비스는 다른 곳을 호출하다 실패하면 **같은 형식의 로그 한 줄**을 남기고, 에러 응답에 **실패 경로(`errorPath`)** 를 담아
-위로 돌려줍니다. 위 서비스는 받은 경로 앞에 자기 구간을 붙이므로, **가장 바깥(게이트웨이) 로그 한 줄에 실패 경로 전체가 보입니다.**
+모든 서비스는 다른 곳을 호출하다 실패하면 **같은 모양의 로그 한 줄**(`msg: "upstream call failed"`)을 남기고, 에러 응답에 **실패 경로(`errorPath`)** 를 담아
+위로 돌려줍니다. 위 서비스는 받은 경로 앞에 자기 구간을 붙이므로, **가장 바깥(게이트웨이) 로그의 `path` 에 실패 경로 전체가 보입니다.**
+
+| 필드 | 뜻 |
+| --- | --- |
+| `target`, `call` | 호출 대상과 `<메서드> <URL>` |
+| `status` | 받은 응답 코드 (`0` = 응답 없음: 연결 실패·타임아웃) |
+| `elapsedMs` | 걸린 시간 |
+| `path` | 실패 경로 |
+| `error`, `stack` | 예외가 실제로 난 곳에서만 |
+
+데모 사건(`incident`) 중 배송 조회 1건이 남기는 로그 (위에서 아래로 = 바깥에서 안쪽으로, `stack` 은 줄임):
 
 ```
-upstream call failed req=<요청 ID> target=<호출 대상> call="<메서드> <URL>" status=<응답 코드, 0=응답 없음> elapsedMs=<걸린 시간> path="<실패 경로>"
-```
-
-데모 사건(`incident`) 중 배송 조회 1건이 남기는 로그 (위에서 아래로 = 바깥에서 안쪽으로):
-
-```
-gateway-service  upstream call failed req=lg-3fa9c1d2e8b0 target=order-service call="GET http://order-service:8080/orders/1374/delivery" status=502 elapsedMs=5098
-                 path="gateway-service → order-service[502] → delivery-service[503] → api.courier.example(10.0.0.62:443) [connect: timed out after 5.01s]"
-order-service    upstream call failed req=lg-3fa9c1d2e8b0 target=delivery-service call="GET http://delivery-service:8080/deliveries/1374/tracking" status=503 elapsedMs=5059
-                 path="order-service → delivery-service[503] → api.courier.example(10.0.0.62:443) [connect: timed out after 5.01s]"
-delivery-service upstream call failed req=lg-3fa9c1d2e8b0 target=api.courier.example call="GET https://api.courier.example/v1/tracking/DX1512686139" ip=10.0.0.62 stage=connect elapsedMs=5006
-                 path="delivery-service → api.courier.example(10.0.0.62:443) [connect: timed out after 5.01s]"
-                 Traceback (most recent call last):
-                   File "/app/app.py", line 84, in call_courier
-                     raw = socket.create_connection((ip, COURIER_PORT), timeout=COURIER_TIMEOUT)
-                   ...
-                 TimeoutError: timed out
+{"ts":"…","level":"WARN","service":"gateway-service","msg":"upstream call failed","req":"lg-3fa9c1d2e8b0","target":"order-service","call":"GET http://order-service:8080/orders/1374/delivery","status":502,"elapsedMs":5098,"step":"tracking","orderId":1374,"path":"gateway-service → order-service[502] → delivery-service[503] → api.courier.example(10.0.0.62:443) [connect: timed out after 5.01s]"}
+{"ts":"…","level":"WARN","service":"order-service","msg":"upstream call failed","req":"lg-3fa9c1d2e8b0","target":"delivery-service","call":"GET http://delivery-service:8080/deliveries/1374/tracking","status":503,"elapsedMs":5059,"path":"order-service → delivery-service[503] → api.courier.example(10.0.0.62:443) [connect: timed out after 5.01s]","orderId":1374}
+{"ts":"…","level":"ERROR","service":"delivery-service","msg":"upstream call failed","req":"lg-3fa9c1d2e8b0","target":"api.courier.example","call":"GET https://api.courier.example/v1/tracking/DX1512686139","ip":"10.0.0.62","stage":"connect","elapsedMs":5006,"orderId":1374,"path":"delivery-service → api.courier.example(10.0.0.62:443) [connect: timed out after 5.01s]","error":"TimeoutError('timed out')","stack":"Traceback (most recent call last):\n  File \"/app/app.py\", line 100, in call_courier\n …\nTimeoutError: timed out\n"}
 ```
 
 - `path` 의 `서비스[코드]` 는 그 서비스가 돌려준 HTTP 응답 코드, 마지막 `[…]` 는 실제로 실패한 원인입니다.
-- **예외가 실제로 난 곳**(연결 타임아웃·연결 거부·DB 오류)은 스택 트레이스를 함께 남깁니다: Python(배송), Java(주문·회원), C#(게이트웨이), Ruby(재고), Node.js(결제).
+- **예외가 실제로 난 곳**(연결 타임아웃·연결 거부·DB 오류)은 `error`·`stack` 필드에 예외와 스택 트레이스를 남깁니다: Python(배송), Java(주문·회원), C#(게이트웨이), Ruby(재고), Node.js(결제).
 - 요청 ID 는 loadgen 이 `lg-…` 로 붙이고(없으면 게이트웨이가 만듦) 모든 서비스가 다음 호출에 그대로 넘깁니다. `./demo.sh traffic` 에 요청 ID 가 찍히므로, 그 ID 로 서비스 로그를 검색하면 됩니다.
 - `./demo.sh status` 도 배송 조회가 실패하면 `실패 경로: …` 한 줄을 보여줍니다.
 
@@ -222,7 +240,7 @@ delivery-service upstream call failed req=lg-3fa9c1d2e8b0 target=api.courier.exa
 
 ```bash
 ID=lg-3fa9c1d2e8b0
-for d in gateway-service order-service delivery-service; do echo "== $d"; oc -n demo-shop logs deploy/$d | grep -A8 "req=$ID"; done
+for d in gateway-service order-service delivery-service; do oc -n demo-shop logs deploy/$d | jq -c --arg id "$ID" 'select(.req==$id) | del(.stack)'; done
 ```
 
 > **eBPF 화면과의 관계**: 실패 경로·요청 ID 는 **애플리케이션 로그**의 기능입니다. eBPF 는 각 구간(게이트웨이→주문, 주문→배송 …)의
@@ -300,6 +318,7 @@ for d in gateway-service order-service delivery-service; do echo "== $d"; oc -n 
 | `git` | `git --version` | `sudo dnf install -y git` |
 | `openssl` | `openssl version` | `sudo dnf install -y openssl` |
 | `bash` 4 이상 | `bash --version` | 기본 설치 |
+| `jq` (선택, JSON 로그 보기) | `jq --version` | `sudo dnf install -y jq` |
 
 - 작업 PC 아키텍처와 클러스터 노드 아키텍처가 같아야 빌드가 빠릅니다 (보통 둘 다 x86_64 → `PLATFORM=linux/amd64`).
 - 작업 PC 는 빌드 중 베이스 이미지·패키지를 받습니다: `docker.io`, `gcr.io`, `mcr.microsoft.com`(.NET), `repo.maven.apache.org`(Java), `rubygems.org`(Ruby WEBrick), `api.nuget.org`(.NET).
@@ -804,13 +823,11 @@ oc scale deploy/loadgen -n demo-infra --replicas=3
 2. **결제 서비스 로그 (Node.js)** — 평범한 예외와 스택 트레이스:
 
    ```bash
-   oc -n demo-shop logs deploy/payment-service --since=1m | grep -A3 "upstream call failed" | tail -4
+   oc -n demo-shop logs deploy/payment-service --since=1m | jq -c 'select(.msg=="upstream call failed")' | tail -1
    ```
 
    ```
-   ERROR payment-service upstream call failed req=lg-… target=pg(api-new.pg.example) call="POST https://api-new.pg.example/v1/payments/approve" status=0 elapsedMs=16 orderId=1006 path="payment-service → pg(api-new.pg.example) [ENOTFOUND: getaddrinfo ENOTFOUND api-new.pg.example after 16ms]"
-   Error: getaddrinfo ENOTFOUND api-new.pg.example
-       at GetAddrInfoReqWrap.onlookupall [as oncomplete] (node:dns:120:26)
+   {"ts":"…","level":"ERROR","service":"payment-service","msg":"upstream call failed","req":"lg-…","target":"pg(api-new.pg.example)","call":"POST https://api-new.pg.example/v1/payments/approve","status":0,"elapsedMs":16,"orderId":1006,"path":"payment-service → pg(api-new.pg.example) [ENOTFOUND: getaddrinfo ENOTFOUND api-new.pg.example after 16ms]","error":"ENOTFOUND: getaddrinfo ENOTFOUND api-new.pg.example","stack":"Error: getaddrinfo ENOTFOUND api-new.pg.example\n    at GetAddrInfoReqWrap.onlookupall [as oncomplete] (node:dns:120:26)"}
    ```
 
 3. **사내 DNS 로그**: `./demo.sh corpdns logs` → `… → ns1-corp-dns(primary) A api-new.pg.example. NXDOMAIN …`
@@ -1087,7 +1104,7 @@ oc adm policy add-scc-to-user privileged -z <agent-serviceaccount> -n <agent-nam
 | 택배사·PG 연결이 됐다 안 됐다 함 | 같은 데모용 IP 가 두 서버에 붙어 있음 → ['주의'](#주의-같은-ip-를-두-서버에-붙이지-마세요) |
 | `check` 의 `[클러스터 → PG] … HTTP 404` | `PG_IP` 가 nginx 가 듣는 IP 가 아님 (다른 웹서버가 응답) → `PG_IP=` 로 비우기 |
 | `check` 의 점검 파드가 `violates PodSecurity "restricted:latest"` | 이전 버전 스크립트. `git pull` (점검 파드에 restricted 보안 설정이 들어간 버전) |
-| 어디서 실패하는지 모르겠음 | `./demo.sh status` 의 `실패 경로`, 또는 `oc -n demo-shop logs deploy/gateway-service \| grep "upstream call failed"` 의 `path=` 를 보면 끝까지 보입니다 ([2. 구성](#애플리케이션-로그로-실패-지점-찾기)) |
+| 어디서 실패하는지 모르겠음 | `./demo.sh status` 의 `실패 경로`, 또는 `oc -n demo-shop logs deploy/gateway-service \| jq -r 'select(.msg=="upstream call failed") \| .path'` 를 보면 끝까지 보입니다 ([2. 구성](#애플리케이션-로그로-실패-지점-찾기)) |
 | `incident` 후에도 배송 조회가 200 | 새 IP 가 이미 허용됨 (`./demo.sh firewall` 에 새 IP 규칙이 있으면 `./demo.sh reset` 후 다시) |
 | 장애 시 5초가 아니라 즉시 실패 | 경로 어딘가에서 RST/ICMP 거부 중. 택배사 호스트 방화벽이 새 IP 를 거부하고 있지 않은지 확인 |
 | 정상 상태에서도 연결 실패 | 택배사 호스트 nginx, 예전 IP 라우팅 확인 (`check` 4번) |

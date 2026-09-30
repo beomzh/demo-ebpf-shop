@@ -14,15 +14,13 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.concurrent.Executors;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
 /**
  * 회원 서비스 (Java + MySQL) — 게이트웨이·주문·결제·알림 서비스가 호출한다.
  * MySQL 은 평문(useSSL=false)으로 연결해 eBPF 가 쿼리를 볼 수 있게 한다.
  */
 public class MemberApp {
-    private static final Logger log = Logger.getLogger("member-service");
+    private static final JsonLog log = new JsonLog("member-service");
 
     private static final String DB_URL = env("DB_URL",
             "jdbc:mysql://mysql:3306/shop?useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=2000&socketTimeout=2000");
@@ -35,7 +33,6 @@ public class MemberApp {
     private static final ThreadLocal<Connection> CONN = new ThreadLocal<>();
 
     public static void main(String[] args) throws Exception {
-        System.setProperty("java.util.logging.SimpleFormatter.format", "%1$tFT%1$tT %4$s member-service %5$s%6$s%n");
         initSchema();
 
         int port = Integer.parseInt(env("PORT", "8080"));
@@ -44,7 +41,7 @@ public class MemberApp {
         server.createContext("/members/", MemberApp::getMember);
         server.setExecutor(Executors.newFixedThreadPool(16));
         server.start();
-        log.info("listening on :" + port);
+        log.info("listening", "port", port, "db", DB_HOST);
     }
 
     private static void getMember(HttpExchange ex) throws IOException {
@@ -70,8 +67,8 @@ public class MemberApp {
                 // 어디(MySQL 어느 주소)를 호출하다 실패했는지 남기고, 위로 errorPath 를 전달한다
                 String reason = String.valueOf(e.getMessage()).lines().findFirst().orElse("");
                 String path = "member-service → mysql(" + DB_HOST + ") [" + e.getClass().getSimpleName() + ": " + reason + "]";
-                log.log(Level.SEVERE, "upstream call failed req=" + reqId + " target=mysql call=\"SELECT members WHERE id=" + id
-                        + "\" path=\"" + path + "\"", e);
+                log.error("upstream call failed", e, "req", reqId, "target", "mysql",
+                        "call", "SELECT members WHERE id=" + id, "path", path);
                 resetConn();
                 send(ex, 500, "{\"error\":\"db error\",\"errorPath\":\"" + path.replace("\\", "\\\\").replace("\"", "\\\"") + "\"}");
                 return;
@@ -79,11 +76,11 @@ public class MemberApp {
         }
         long elapsedMs = (System.nanoTime() - started) / 1_000_000;
         if (json == null) {
-            log.info("member not found req=" + reqId + " id=" + id + " elapsedMs=" + elapsedMs);
+            log.info("member not found", "req", reqId, "memberId", id, "elapsedMs", elapsedMs);
             send(ex, 404, "{\"error\":\"not found\"}");
         } else {
-            log.info("member ok req=" + reqId + " id=" + id + " grade=" + json.replaceFirst(".*\"grade\":\"([^\"]*)\".*", "$1")
-                    + " elapsedMs=" + elapsedMs);
+            log.info("member ok", "req", reqId, "memberId", id,
+                    "grade", json.replaceFirst(".*\"grade\":\"([^\"]*)\".*", "$1"), "elapsedMs", elapsedMs);
             send(ex, 200, json);
         }
     }
@@ -143,7 +140,7 @@ public class MemberApp {
                 log.info("schema ready");
                 return;
             } catch (SQLException e) {
-                log.warning("mysql not ready (attempt " + attempt + "): " + e.getMessage());
+                log.warn("mysql not ready", "attempt", attempt, "error", e.getMessage());
                 Thread.sleep(3000);
             }
         }

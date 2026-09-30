@@ -16,8 +16,6 @@ import java.time.Duration;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -35,7 +33,7 @@ import java.util.regex.Pattern;
  * 배송 서비스가 돌려준 5xx 가 그대로 기록되게 한다.
  */
 public class OrderApp {
-    private static final Logger log = Logger.getLogger("order-service");
+    private static final JsonLog log = new JsonLog("order-service");
     private static final String SERVICE = "order-service";
 
     private static final String MEMBER_URL = env("MEMBER_URL", "http://member-service:8080");
@@ -67,14 +65,13 @@ public class OrderApp {
     }
 
     public static void main(String[] args) throws IOException {
-        System.setProperty("java.util.logging.SimpleFormatter.format", "%1$tFT%1$tT %4$s order-service %5$s%6$s%n");
         int port = Integer.parseInt(env("PORT", "8080"));
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/health", ex -> send(ex, 200, "{\"status\":\"UP\"}"));
         server.createContext("/orders", OrderApp::route);
         server.setExecutor(Executors.newFixedThreadPool(64));
         server.start();
-        log.info("listening on :" + port + " delivery=" + DELIVERY_URL + " deliveryTimeout=" + DELIVERY_TIMEOUT);
+        log.info("listening", "port", port, "delivery", DELIVERY_URL, "deliveryTimeoutSeconds", DELIVERY_TIMEOUT.toSeconds());
     }
 
     private static void route(HttpExchange ex) throws IOException {
@@ -93,7 +90,7 @@ public class OrderApp {
             }
             send(ex, 404, "{\"error\":\"not found\"}");
         } catch (Exception e) {
-            log.log(Level.SEVERE, "unhandled error req=" + reqId + " " + method + " " + path, e);
+            log.error("unhandled error", e, "req", reqId, "call", method + " " + path);
             send(ex, 500, "{\"error\":\"internal error\",\"errorPath\":\"" + jsonEscape(SERVICE + " [" + e + "]") + "\"}");
         }
     }
@@ -108,26 +105,26 @@ public class OrderApp {
 
         // 1) 회원 확인 (회원 → MySQL)
         Upstream member = call("member-service", "GET", MEMBER_URL + "/members/" + memberId, reqId, DEFAULT_TIMEOUT, null);
-        if (!member.is(200)) { fail(ex, reqId, member, "orderId=" + orderId); return; }
+        if (!member.is(200)) { fail(ex, reqId, member, "orderId", orderId); return; }
 
         // 2) 재고 차감 (재고 → Redis)
         Upstream stock = call("inventory-service", "POST", INVENTORY_URL + "/inventory/" + productId + "/reserve", reqId,
                 DEFAULT_TIMEOUT, "{\"qty\":" + qty + "}");
-        if (!stock.is(200)) { fail(ex, reqId, stock, "orderId=" + orderId); return; }
+        if (!stock.is(200)) { fail(ex, reqId, stock, "orderId", orderId); return; }
 
         // 3) 결제 (결제 → 회원, 결제 → 외부 PG 승인)
         Upstream payment = call("payment-service", "POST", PAYMENT_URL + "/payments", reqId, PAYMENT_TIMEOUT,
                 "{\"orderId\":" + orderId + ",\"memberId\":" + memberId + ",\"amount\":" + amount + "}");
-        if (!payment.is(201)) { fail(ex, reqId, payment, "orderId=" + orderId); return; }
+        if (!payment.is(201)) { fail(ex, reqId, payment, "orderId", orderId); return; }
 
         // 4) 알림 (알림 → 회원). 알림 실패는 로그만 남기고 주문은 성공시킨다
         Upstream noti = call("notification-service", "POST", NOTIFICATION_URL + "/notifications", reqId, DEFAULT_TIMEOUT,
                 "{\"orderId\":" + orderId + ",\"memberId\":" + memberId + "}");
-        if (!noti.is(202)) logFailure(reqId, noti, "orderId=" + orderId + " (주문은 계속 진행)");
+        if (!noti.is(202)) logFailure(reqId, noti, "orderId", orderId, "note", "주문은 계속 진행");
 
-        log.info("order created req=" + reqId + " orderId=" + orderId + " memberId=" + memberId + " productId=" + productId
-                + " qty=" + qty + " amount=" + amount + " memberMs=" + member.ms() + " stockMs=" + stock.ms()
-                + " paymentMs=" + payment.ms() + " notificationMs=" + noti.ms());
+        log.info("order created", "req", reqId, "orderId", orderId, "memberId", Long.parseLong(memberId),
+                "productId", Long.parseLong(productId), "qty", Long.parseLong(qty), "amount", amount,
+                "memberMs", member.ms(), "stockMs", stock.ms(), "paymentMs", payment.ms(), "notificationMs", noti.ms());
 
         send(ex, 201, "{\"orderId\":" + orderId + ",\"memberId\":" + memberId + ",\"productId\":" + productId
                 + ",\"qty\":" + qty + ",\"amount\":" + amount + "}");
@@ -137,11 +134,11 @@ public class OrderApp {
         Upstream delivery = call("delivery-service", "GET", DELIVERY_URL + "/deliveries/" + orderId + "/tracking", reqId,
                 DELIVERY_TIMEOUT, null);
         if (delivery.is(200)) {
-            log.info("tracking ok req=" + reqId + " orderId=" + orderId + " deliveryMs=" + delivery.ms());
+            log.info("tracking ok", "req", reqId, "orderId", Long.parseLong(orderId), "deliveryMs", delivery.ms());
             send(ex, 200, delivery.body());
             return;
         }
-        fail(ex, reqId, delivery, "orderId=" + orderId);
+        fail(ex, reqId, delivery, "orderId", Long.parseLong(orderId));
     }
 
     /** 하위 서비스 호출. 예외를 던지지 않고 결과(Upstream)로 돌려준다. */
@@ -163,20 +160,23 @@ public class OrderApp {
     }
 
     /** 실패 로그를 남기고, 위(게이트웨이)로 errorPath 를 담은 502/504 를 돌려준다. */
-    private static void fail(HttpExchange ex, String reqId, Upstream u, String detail) throws IOException {
+    private static void fail(HttpExchange ex, String reqId, Upstream u, Object... detail) throws IOException {
         String path = logFailure(reqId, u, detail);
         int status = u.error() != null ? 504 : 502;
         send(ex, status, "{\"error\":\"" + u.target() + " call failed\",\"errorPath\":\"" + jsonEscape(path) + "\"}");
     }
 
-    private static String logFailure(String reqId, Upstream u, String detail) {
+    private static String logFailure(String reqId, Upstream u, Object... detail) {
         String path = errorPath(u);
-        String msg = "upstream call failed req=" + reqId + " target=" + u.target() + " call=\"" + u.method() + " " + u.url()
-                + "\" status=" + u.status() + " elapsedMs=" + u.ms() + " " + detail + " path=\"" + path + "\"";
+        Object[] kv = new Object[12 + detail.length];
+        Object[] base = {"req", reqId, "target", u.target(), "call", u.method() + " " + u.url(),
+                "status", u.status(), "elapsedMs", u.ms(), "path", path};
+        System.arraycopy(base, 0, kv, 0, base.length);
+        System.arraycopy(detail, 0, kv, base.length, detail.length);
         if (u.error() != null) {
-            log.log(Level.SEVERE, msg, u.error());   // 연결 실패·타임아웃은 스택 트레이스까지
+            log.error("upstream call failed", u.error(), kv);   // 연결 실패·타임아웃은 스택 트레이스까지
         } else {
-            log.warning(msg);
+            log.warn("upstream call failed", kv);
         }
         return path;
     }

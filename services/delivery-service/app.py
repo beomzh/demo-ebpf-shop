@@ -31,10 +31,26 @@ COURIER_CA_FILE = os.getenv("COURIER_CA_FILE", "/etc/courier-ca/ca.crt")
 LOG_STACKTRACE = os.getenv("LOG_STACKTRACE", "true").lower() == "true"
 SERVICE = "delivery-service"
 
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s %(levelname)s delivery-service %(message)s",
-)
+class JsonFormatter(logging.Formatter):
+    """한 줄짜리 JSON: {ts, level, service, msg, ...필드}. 필드는 extra={"fields": {...}}, 예외는 error·stack 필드로."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        entry = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(record.created)) + f".{int(record.msecs):03d}Z",
+            "level": record.levelname,
+            "service": SERVICE,
+            "msg": record.getMessage(),
+        }
+        entry.update(getattr(record, "fields", {}))
+        if record.exc_info:
+            entry["error"] = repr(record.exc_info[1].__cause__ or record.exc_info[1])
+            entry["stack"] = self.formatException(record.exc_info)
+        return json.dumps(entry, ensure_ascii=False)
+
+
+_handler = logging.StreamHandler()
+_handler.setFormatter(JsonFormatter())
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), handlers=[_handler])
 log = logging.getLogger("delivery")
 
 TRACKING_PATH = re.compile(r"^/deliveries/(\d+)/tracking$")
@@ -44,7 +60,7 @@ def build_ssl_context() -> ssl.SSLContext:
     # 기본은 fail-closed: CA 파일이 없으면 기동하지 않는다.
     # 검증 없이 띄우려면 COURIER_TLS_INSECURE=true 를 명시해야 한다 (로컬 실험용).
     if COURIER_CA_FILE and os.path.isfile(COURIER_CA_FILE):
-        log.info("courier TLS: verifying with CA %s", COURIER_CA_FILE)
+        log.info("courier TLS: verifying with CA", extra={"fields": {"caFile": COURIER_CA_FILE}})
         ctx = ssl.create_default_context(cafile=COURIER_CA_FILE)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         return ctx
@@ -54,8 +70,8 @@ def build_ssl_context() -> ssl.SSLContext:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         return ctx
-    log.critical("courier TLS: CA file %s not found. Mount the courier-ca secret "
-                 "(or set COURIER_TLS_INSECURE=true for local experiments only)", COURIER_CA_FILE)
+    log.critical("courier TLS: CA file not found. Mount the courier-ca secret "
+                 "(or set COURIER_TLS_INSECURE=true for local experiments only)", extra={"fields": {"caFile": COURIER_CA_FILE}})
     raise SystemExit(1)
 
 
@@ -141,21 +157,25 @@ class Handler(BaseHTTPRequestHandler):
             # 실패 경로: 이 서비스 → 어디를 호출하다 [무엇 때문에] 실패했는지. 위 서비스들이 앞에 자기 구간을 붙인다
             error_path = f"{SERVICE} → {target} [{reason}]"
             log.error(
-                'upstream call failed req=%s target=%s call="GET https://%s/v1/tracking/%s" ip=%s stage=%s '
-                'elapsedMs=%d order=%s path="%s"',
-                req_id, COURIER_HOST, COURIER_HOST, tracking_no, e.ip, e.stage, elapsed * 1000, order_id, error_path,
+                "upstream call failed",
+                extra={"fields": {
+                    "req": req_id, "target": COURIER_HOST, "call": f"GET https://{COURIER_HOST}/v1/tracking/{tracking_no}",
+                    "ip": e.ip, "stage": e.stage, "elapsedMs": int(elapsed * 1000), "orderId": int(order_id), "path": error_path,
+                }},
                 exc_info=e if LOG_STACKTRACE else None,
             )
             self._send(503, {"error": "courier unavailable", "orderId": order_id, "errorPath": error_path})
             return
 
         elapsed = time.monotonic() - started
-        log.info("tracking ok req=%s order=%s tracking=%s elapsed=%.3fs", req_id, order_id, tracking_no, elapsed)
+        log.info("tracking ok", extra={"fields": {
+            "req": req_id, "orderId": int(order_id), "trackingNo": tracking_no, "elapsedMs": int(elapsed * 1000)}})
         self._send(200, {"orderId": order_id, "tracking": data})
 
 
 def main():
-    log.info("listening on :%d courier=%s:%d timeout=%.1fs", PORT, COURIER_HOST, COURIER_PORT, COURIER_TIMEOUT)
+    log.info("listening", extra={"fields": {
+        "port": PORT, "courier": f"{COURIER_HOST}:{COURIER_PORT}", "timeoutSeconds": COURIER_TIMEOUT}})
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
 

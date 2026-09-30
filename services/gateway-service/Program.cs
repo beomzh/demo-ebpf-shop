@@ -11,13 +11,13 @@ using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Logging.Console;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Logging.ClearProviders();
-builder.Logging.AddSimpleConsole(o => { o.SingleLine = true; o.TimestampFormat = "yyyy-MM-ddTHH:mm:ss "; });
+builder.Logging.AddConsole(o => o.FormatterName = "demo-json").AddConsoleFormatter<JsonLogFormatter, ConsoleFormatterOptions>();
 builder.Logging.AddFilter("Microsoft", LogLevel.Warning);   // ASP.NET 프레임워크의 요청별 INFO 로그는 끈다
 var app = builder.Build();
-var log = app.Logger;
 
 static string Env(string key, string def) =>
     Environment.GetEnvironmentVariable(key) is { Length: > 0 } v ? v : def;
@@ -87,14 +87,19 @@ string ErrorPath(Upstream u)
 }
 
 // 실패 로그(어디를 호출하다 실패했는지 + 전체 실패 경로)를 남기고, 사용자에게 errorPath 를 담은 502/504 를 돌려준다.
-IResult Fail(string reqId, Upstream u, string detail = "")
+IResult Fail(string reqId, Upstream u, params (string Key, object? Value)[] detail)
 {
     var path = ErrorPath(u);
-    const string msg = "upstream call failed req={ReqId} target={Target} call=\"{Method} {Url}\" status={Status} elapsedMs={Ms} {Detail} path=\"{Path}\"";
+    var fields = new List<(string, object?)>
+    {
+        ("req", reqId), ("target", u.Target), ("call", $"{u.Method} {u.Url}"), ("status", u.Status), ("elapsedMs", u.Ms),
+    };
+    fields.AddRange(detail);
+    fields.Add(("path", path));
     if (u.Error != null)
-        log.LogError(u.Error, msg, reqId, u.Target, u.Method, u.Url, u.Status, u.Ms, detail, path);   // 스택 트레이스 포함
+        JsonLog.Error("upstream call failed", u.Error, fields.ToArray());   // 스택 트레이스 포함
     else
-        log.LogWarning(msg, reqId, u.Target, u.Method, u.Url, u.Status, u.Ms, detail, path);
+        JsonLog.Warn("upstream call failed", fields.ToArray());
     var status = u.Error != null ? 504 : 502;
     return Results.Json(new { error = $"{u.Target} call failed", errorPath = path }, statusCode: status);
 }
@@ -102,9 +107,11 @@ IResult Fail(string reqId, Upstream u, string detail = "")
 IResult Json(int status, string body) => Results.Content(body, "application/json", Encoding.UTF8, status);
 
 // 정상 처리 로그 한 줄 (요청 ID·결과·걸린 시간)
-IResult Ok(string reqId, string what, Upstream u, string detail = "")
+IResult Ok(string reqId, string what, Upstream u, params (string Key, object? Value)[] detail)
 {
-    log.LogInformation("{What} ok req={ReqId} status={Status} elapsedMs={Ms} {Detail}", what, reqId, u.Status, u.Ms, detail);
+    var fields = new List<(string, object?)> { ("req", reqId), ("status", u.Status), ("elapsedMs", u.Ms) };
+    fields.AddRange(detail);
+    JsonLog.Info($"{what} ok", fields.ToArray());
     return Json(u.Status, u.Body);
 }
 
@@ -114,14 +121,14 @@ app.MapGet("/api/products/{id:int}", async (int id, HttpContext ctx) =>
 {
     var reqId = RequestId(ctx);
     var r = await Call("product-service", HttpMethod.Get, $"{productUrl}/products/{id}", reqId, defaultTimeout);
-    return r.Status == 200 ? Ok(reqId, "product", r, $"productId={id}") : Fail(reqId, r);
+    return r.Status == 200 ? Ok(reqId, "product", r, ("productId", id)) : Fail(reqId, r);
 });
 
 app.MapGet("/api/members/{id:int}", async (int id, HttpContext ctx) =>
 {
     var reqId = RequestId(ctx);
     var r = await Call("member-service", HttpMethod.Get, $"{memberUrl}/members/{id}", reqId, defaultTimeout);
-    return r.Status == 200 ? Ok(reqId, "member", r, $"memberId={id}") : Fail(reqId, r);
+    return r.Status == 200 ? Ok(reqId, "member", r, ("memberId", id)) : Fail(reqId, r);
 });
 
 app.MapPost("/api/checkout", async (HttpContext ctx) =>
@@ -143,7 +150,7 @@ app.MapPost("/api/checkout", async (HttpContext ctx) =>
 
     // 1) 상품 가격 확인 (상품 → 재고 → Redis)
     var product = await Call("product-service", HttpMethod.Get, $"{productUrl}/products/{productId}", reqId, defaultTimeout);
-    if (product.Status != 200) return Fail(reqId, product, $"step=price productId={productId}");
+    if (product.Status != 200) return Fail(reqId, product, ("step", "price"), ("productId", productId));
     int price;
     using (var pdoc = JsonDocument.Parse(product.Body)) price = pdoc.RootElement.GetProperty("price").GetInt32();
 
@@ -151,19 +158,19 @@ app.MapPost("/api/checkout", async (HttpContext ctx) =>
     var payload = JsonSerializer.Serialize(new { memberId, productId, qty, price });
     var order = await Call("order-service", HttpMethod.Post, $"{orderUrl}/orders", reqId, checkoutTimeout, payload);
     return order.Status == 201
-        ? Ok(reqId, "checkout", order, $"memberId={memberId} productId={productId} qty={qty} price={price}")
-        : Fail(reqId, order, $"step=order memberId={memberId} productId={productId}");
+        ? Ok(reqId, "checkout", order, ("memberId", memberId), ("productId", productId), ("qty", qty), ("price", price))
+        : Fail(reqId, order, ("step", "order"), ("memberId", memberId), ("productId", productId));
 });
 
 app.MapGet("/api/orders/{id:long}/tracking", async (long id, HttpContext ctx) =>
 {
     var reqId = RequestId(ctx);
     var r = await Call("order-service", HttpMethod.Get, $"{orderUrl}/orders/{id}/delivery", reqId, trackingTimeout);
-    return r.Status == 200 ? Ok(reqId, "tracking", r, $"orderId={id}") : Fail(reqId, r, $"step=tracking orderId={id}");
+    return r.Status == 200 ? Ok(reqId, "tracking", r, ("orderId", id)) : Fail(reqId, r, ("step", "tracking"), ("orderId", id));
 });
 
-log.LogInformation("gateway listening product={Product} member={Member} order={Order} trackingTimeout={Timeout}s",
-    productUrl, memberUrl, orderUrl, trackingTimeout.TotalSeconds);
+JsonLog.Info("listening", ("product", productUrl), ("member", memberUrl), ("order", orderUrl),
+    ("checkoutTimeoutSeconds", checkoutTimeout.TotalSeconds), ("trackingTimeoutSeconds", trackingTimeout.TotalSeconds));
 app.Run();
 
 /// <summary>하위 서비스 호출 결과</summary>

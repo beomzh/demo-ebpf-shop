@@ -2,7 +2,7 @@ FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
 COPY gateway-service.csproj .
 RUN dotnet restore
-COPY Program.cs .
+COPY *.cs .
 RUN dotnet publish -c Release -o /out --no-restore
 
 # aspnet 이미지는 기본으로 8080 에서 듣는다 (ASPNETCORE_HTTP_PORTS=8080).
