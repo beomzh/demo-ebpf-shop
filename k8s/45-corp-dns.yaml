@@ -2,7 +2,7 @@
 #   - DNS 포워더(47-dns-forwarder.yaml)가 결제·배송 서비스의 질의를 이 두 서버로 전달한다 (주 → 보조 순서)
 #   - 두 서버는 같은 존(corp-dns-zone ConfigMap)을 읽는다 = 주 → 보조 존 복제가 끝난 상태
 #   - 루트(.) 존을 권한 있게 맡으므로 등록되지 않은 이름에는 NXDOMAIN 을 답한다
-#   - 로그에 질의마다 서버 이름이 찍힌다 → 주 DNS 파드를 지우면 질의가 보조 DNS 로 넘어가는 것이 보인다
+#   - 로그는 CoreDNS 기본 형식 (클라이언트 IP:포트, 질의 ID, 질의, 응답 코드, 소요시간) — 어느 서버 로그인지는 파드 이름으로 구분
 #   - demo-infra 는 인바운드 기본 차단(55-network-isolation.yaml)이라 DNS 포워더 → 사내 DNS 를 허용한다
 #     (결제 서비스 파드도 허용: ./demo.sh pg-status·check 가 서버별로 직접 조회해 보는 점검용)
 # 존 ConfigMap(corp-dns-zone)은 레코드를 바꿀 수 있도록 매니페스트가 아니라 스크립트(scripts/corpdns.sh)가 만든다.
@@ -17,7 +17,7 @@ data:
         file /etc/coredns/zone/db.corp . {
             reload 2s
         }
-        log . "{remote} → ns1-corp-dns(primary) {type} {name} {rcode} {duration}"
+        log
         errors
     }
   Corefile.secondary: |
@@ -25,7 +25,7 @@ data:
         file /etc/coredns/zone/db.corp . {
             reload 2s
         }
-        log . "{remote} → ns2-corp-dns(secondary) {type} {name} {rcode} {duration}"
+        log
         errors
     }
 ---

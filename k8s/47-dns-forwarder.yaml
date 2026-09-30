@@ -2,7 +2,9 @@
 #   - 외부 도메인(택배사·PG)은 사내 DNS 로 전달한다: 주 DNS(ns1-corp-dns) 먼저, 실패하면 보조 DNS(ns2-corp-dns)
 #     (policy sequential + health_check: 주 DNS 가 응답하지 않으면 1초 안에 '비정상'으로 보고 보조 DNS 로 보낸다)
 #   - cluster.local 은 클러스터 DNS 로 전달한다 (결제 서비스 → 회원 서비스)
-#   - 사내 DNS 가 응답하지 않으면 errors 로그에 "어느 IP 로 질의했는데 실패했는지"가 남는다:
+#   - 로그는 실제 클러스터 CoreDNS 와 같은 기본 형식:
+#       [INFO] <클라이언트 IP>:<포트> - <질의 ID> "A IN api.courier.example. udp 37 false 512" NOERROR qr,rd,ra 72 0.0004s
+#   - 사내 DNS 가 응답하지 않으면 errors 로그에 "어느 IP·포트로 질의했는데 실패했는지"가 남는다:
 #       [ERROR] plugin/errors: 2 api.courier.example. A: read udp <포워더>:<포트>-><사내 DNS IP>:53: i/o timeout
 #   - 포워더의 나가는 연결은 사내 방화벽(50-firewall.yaml)이 제한한다: 사내 주 DNS 만 허용, 보조 DNS 는 등록 누락 (시나리오 1)
 # __CORP_DNS_PRIMARY__/SECONDARY 는 scripts/deploy.sh 가 ns1/ns2-corp-dns 서비스의 ClusterIP 로 채운다.
@@ -24,7 +26,7 @@ data:
             health_check 1s
             max_fails 1
         }
-        log . "{remote} → dns-forwarder {type} {name} {rcode} {duration}"
+        log
         errors
     }
 ---

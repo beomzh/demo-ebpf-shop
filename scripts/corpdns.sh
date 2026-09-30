@@ -55,7 +55,14 @@ corp_up() {
 # DNS 포워더: 사내 DNS 주소(ClusterIP)를 넣어 배포한다. 주소가 바뀌면 파드 annotation 이 바뀌어 재시작된다
 forwarder_up() {
   info "DNS 포워더 배포 (${DNS_FORWARDER_NAME} → 주 ${CORP_DNS_PRIMARY}, 보조 ${CORP_DNS_SECONDARY})"
+  local before after
+  before="$(kc -n "$INFRA_NS" get configmap dns-forwarder-corefile -o jsonpath='{.data}' 2>/dev/null || true)"
   render "$ROOT/k8s/47-dns-forwarder.yaml" | kc apply -f - >/dev/null
+  after="$(kc -n "$INFRA_NS" get configmap dns-forwarder-corefile -o jsonpath='{.data}' 2>/dev/null || true)"
+  if [[ -n "$before" && "$before" != "$after" ]]; then
+    info "포워더 설정(Corefile)이 바뀜 → 파드 재시작"
+    kc -n "$INFRA_NS" rollout restart "statefulset/$DNS_FORWARDER_NAME" >/dev/null
+  fi
   kc -n "$INFRA_NS" rollout status "statefulset/$DNS_FORWARDER_NAME" --timeout=120s >/dev/null
   DNS_FORWARDER_IP="$(corp_dns_svc_ip "$DNS_FORWARDER_NAME")"
   [[ -n "$DNS_FORWARDER_IP" ]] || die "DNS 포워더 ClusterIP 를 가져오지 못했습니다."

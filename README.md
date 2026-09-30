@@ -172,7 +172,7 @@ OpenShift 로깅 등)에서 `service`·`req`·`level`·`status` 로 바로 검�
 
 | 필드 | 뜻 |
 | --- | --- |
-| `ts` | 시각 (UTC, 밀리초) |
+| `ts` | 시각 — **한국 시간** (`+09:00`, 밀리초). 이미지 기본 시간대 `TZ=Asia/Seoul` |
 | `level` | `INFO` / `WARN` / `ERROR` |
 | `service` | 서비스 이름 (`gateway-service` …) |
 | `msg` | 무슨 일인지 (`checkout ok`, `upstream call failed` …) |
@@ -192,7 +192,7 @@ oc -n demo-shop logs deploy/delivery-service --since=1m | jq -r 'select(.level==
 **정상 처리 로그 (INFO)** — 요청을 정상 처리하면 서비스마다 한 줄. 체크아웃 1건 예:
 
 ```
-{"ts":"2026-09-30T01:07:19.531Z","level":"INFO","service":"gateway-service","msg":"checkout ok","req":"lg-…","status":201,"elapsedMs":111,"memberId":10,"productId":3,"qty":2,"price":4000}
+{"ts":"2026-09-30T10:07:19.531+09:00","level":"INFO","service":"gateway-service","msg":"checkout ok","req":"lg-…","status":201,"elapsedMs":111,"memberId":10,"productId":3,"qty":2,"price":4000}
 {"ts":"…","level":"INFO","service":"product-service","msg":"product ok","req":"lg-…","productId":3,"price":4000,"stock":1000,"elapsedMs":1}
 {"ts":"…","level":"INFO","service":"inventory-service","msg":"stock ok","req":"lg-…","productId":3,"stock":1000,"elapsedMs":1}
 {"ts":"…","level":"INFO","service":"member-service","msg":"member ok","req":"lg-…","memberId":10,"grade":"VIP","elapsedMs":2}
@@ -843,7 +843,7 @@ oc scale deploy/loadgen -n demo-infra --replicas=3
    {"ts":"…","level":"ERROR","service":"payment-service","msg":"upstream call failed","req":"lg-…","target":"pg(api-new.pg.example)","call":"POST https://api-new.pg.example/v1/payments/approve","status":0,"elapsedMs":16,"orderId":1006,"path":"payment-service → pg(api-new.pg.example) [ENOTFOUND: getaddrinfo ENOTFOUND api-new.pg.example after 16ms]","error":"ENOTFOUND: getaddrinfo ENOTFOUND api-new.pg.example","stack":"Error: getaddrinfo ENOTFOUND api-new.pg.example\n    at GetAddrInfoReqWrap.onlookupall [as oncomplete] (node:dns:120:26)"}
    ```
 
-3. **포워더·사내 DNS 로그**: `./demo.sh corpdns logs` → `… → dns-forwarder A api-new.pg.example. NXDOMAIN …`, `… → ns1-corp-dns(primary) A api-new.pg.example. NXDOMAIN …`
+3. **포워더·사내 DNS 로그**: `./demo.sh corpdns logs` → `[pod/dns-forwarder-0/coredns] [INFO] 10.128.2.31:44334 - 61105 "A IN api-new.pg.example. udp 37 false 512" NXDOMAIN qr,aa,rd 97 0.0004s`
 
 해결(`pg-register`) 뒤에는 결제 서비스가 다음 요청부터 새 레코드를 받아 체크아웃이 201 로 돌아오고, DNS 탭의 NXDOMAIN 이 멈춥니다
 (PG 인증서에 새 도메인도 들어 있어 **등록만으로 회복**).
@@ -863,14 +863,17 @@ oc scale deploy/loadgen -n demo-infra --replicas=3
 ```
 
 ```
-[INFO] 10.128.2.40 → dns-forwarder A api.courier.example. NOERROR 0.0003s                                   ← 평소: 주 DNS 가 답함
-[INFO] 10.128.2.40 → dns-forwarder A api.courier.example. - 3.004s                                         ← incident 뒤
-[ERROR] plugin/errors: 2 api.courier.example. A: read udp 10.128.2.20:41173->172.30.0.10:53: i/o timeout    ← 주 DNS(ns1) 로 질의 → 응답 없음
-[INFO] 10.128.2.31 → dns-forwarder A api.pg.example. - 3.002s
-[ERROR] plugin/errors: 2 api.pg.example. A: read udp 10.128.2.20:50976->172.30.0.11:53: i/o timeout         ← 다음 서버 보조 DNS(ns2) 로 넘어감 → 역시 응답 없음
+[INFO] 10.128.2.40:37138 - 28766 "A IN api.courier.example. udp 37 false 512" NOERROR qr,aa,rd 99 0.0006s   ← 평소: 주 DNS 가 답함
+[INFO] 10.128.2.40:37679 - 46484 "A IN api.courier.example. udp 37 false 512" - - 0 3.004s                 ← incident 뒤: 응답 못 함
+[ERROR] plugin/errors: 2 api.courier.example. A: read udp 10.128.2.20:39741->172.30.0.10:53: i/o timeout     ← 주 DNS(ns1) 로 질의 → 응답 없음
+[INFO] 10.128.2.31:44334 - 61105 "A IN api.pg.example. udp 32 false 512" - - 0 3.002s
+[ERROR] plugin/errors: 2 api.pg.example. A: read udp 10.128.2.20:50976->172.30.0.11:53: i/o timeout          ← 다음 서버 보조 DNS(ns2) 로 넘어감 → 역시 응답 없음
 ```
 
-- `->172.30.0.10:53` 이 주 DNS(`ns1-corp-dns`), `->172.30.0.11:53` 이 보조 DNS(`ns2-corp-dns`) 의 서비스 IP 입니다 (`./demo.sh corpdns status`).
+- 로그는 실제 클러스터 CoreDNS 와 같은 기본 형식입니다: `[INFO] <질의한 파드 IP>:<포트> - <질의 ID> "<타입> IN <이름> <프로토콜> …" <응답 코드> <플래그> <크기> <소요시간>`.
+  응답 코드 자리가 `-` 이면 **사내 DNS 에서 답을 받지 못한 것**입니다.
+- `[ERROR]` 줄의 `read udp <포워더 IP>:<포트>-><사내 DNS IP>:53` 이 **어느 IP·포트로 질의했다가 실패했는지**입니다.
+  `->172.30.0.10:53` 이 주 DNS(`ns1-corp-dns`), `->172.30.0.11:53` 이 보조 DNS(`ns2-corp-dns`) 의 서비스 IP 입니다 (`./demo.sh corpdns status`).
   `./demo.sh status` 는 이 줄에 `(ns1-corp-dns 주)`·`(ns2-corp-dns 보조)` 를 붙여 보여줍니다.
 - 처음에는 주 DNS 로 가다가 실패하고, 주 DNS 가 '비정상'으로 표시된 뒤로는 **보조 DNS 로 넘어가 거기서도 타임아웃**이 납니다 → 보조 DNS 로 가는 길이 막혔다.
 - CNI 가 "파드 없는 서비스"로 가는 패킷을 거부하면 주 DNS 줄은 `i/o timeout` 대신 `connection refused` 로 나옵니다.
@@ -885,7 +888,7 @@ oc scale deploy/loadgen -n demo-infra --replicas=3
 **`fix` 뒤** — 보조 DNS 로그에 포워더의 질의가 찍히기 시작하고, 포워더 오류가 멈춥니다 (주 DNS 는 여전히 없음):
 
 ```
-[pod/ns2-corp-dns-0/coredns] [INFO] 10.128.2.20 → ns2-corp-dns(secondary) A api.courier.example. NOERROR 0.0001s
+[pod/ns2-corp-dns-0/coredns] [INFO] 10.128.2.20:57161 - 23493 "A IN api.courier.example. udp 37 false 512" NOERROR qr,aa,rd 99 0.0001s   ← 클라이언트 = 포워더 IP
 ```
 
 - 앱 로그 (JSON): 배송 `"stage":"dns","ip":"-","error":"gaierror(-3, 'Temporary failure in name resolution')"`,
@@ -1004,6 +1007,7 @@ OCP 내부 레지스트리는 **push 하는 주소와 pull 하는 주소가 다�
 - **평문 서비스 간 통신**: 서비스 간 HTTP/1.1 평문, MySQL `useSSL=false` → SLO Client 표·MySQL 탭에 프로토콜이 구분되어 나옵니다.
 - **프로브 잡음 제거**: readinessProbe 는 `tcpSocket` → kubelet 의 HTTP 헬스체크가 지표에 섞이지 않습니다.
 - **데모 장치 분리**: 부하 발생기·사내 DNS 는 `demo-infra` → `demo-shop` 으로 필터하면 여덟 서비스(+MySQL·Redis)만 보입니다.
+- **한국 시간**: 여덟 서비스 이미지는 `ENV TZ=Asia/Seoul` (MySQL·Redis 파드도 `TZ`) → 로그 `ts` 가 `+09:00` 으로 찍힙니다. 다른 시간대로 바꾸려면 파드에 `TZ` 환경변수를 주면 됩니다.
 - **평문 Redis**: 재고 서비스는 외부 라이브러리 없이 RESP 로 Redis 와 평문 통신 → Redis 명령이 보입니다.
 - **확실한 드롭**: 방화벽(NetworkPolicy)은 거부가 아니라 조용히 버림 → 보조 DNS 로 간 질의는 응답 없이 2초 뒤 타임아웃됩니다.
 
