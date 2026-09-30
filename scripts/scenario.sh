@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# 사건 시나리오 전환 스크립트 — 시나리오 3개
+# 사건 시나리오 전환 스크립트 — 시나리오 2개
 #
-# ① 방화벽 차단 (배송 서비스 → 외부 택배사)
-#   baseline   정상 상태   사내 DNS 의 택배사 레코드 → 예전 IP, 방화벽: 예전 IP 만 허용   (월요일 밤 이전)
-#   incident   사건 발생   사내 DNS 의 택배사 레코드 → 새 IP,   방화벽: 예전 IP 만 허용   (월요일 밤: 택배사가 IP 변경)
-#   firewall   방화벽 규칙 목록 (원인 확인 장면)
-#   fix        해결        방화벽에 새 IP 허용 규칙 추가
-#   reset      baseline 과 같음 (다음 촬영 준비)
-#   status     사내 DNS 의 택배사 레코드·배송 파드의 DNS 응답과 연결·방화벽 규칙·배송 조회 1건
+# ① 주 DNS 장애 → 보조 DNS 가 방화벽에 막힘 (배송 서비스 → 외부 택배사)
+#   baseline   정상 상태   주·보조 DNS 모두 기동, 방화벽: 배송 → 주 DNS·택배사만 허용 (보조 DNS 는 등록 누락)
+#   incident   사건 발생   주 DNS 파드(ns1-corp-dns-0) 삭제(replica=0) → OS 리졸버가 보조 DNS(ns2) 로 (타임아웃 2초)
+#                          → 배송 서비스는 방화벽에 막혀 도메인을 못 찾음, 결제 서비스는 보조 DNS 로 정상
+#   firewall   방화벽 규칙 목록 (원인 확인 장면: 주 DNS 만 있고 보조 DNS 가 없음)
+#   fix        해결        방화벽에 보조 DNS 허용 규칙 추가 → 주 DNS 가 죽은 채로 회복
+#   reset      baseline 과 같음 (다음 촬영 준비: 보조 DNS 규칙 삭제, 주 DNS 다시 기동)
+#   status     사내 DNS 파드·배송 파드의 DNS 조회와 연결·방화벽 규칙·배송 조회 1건
 #
 # ② DNS 이름 변경 → 없는 이름 조회 (결제 서비스 → 외부 PG사)
 #   pg-missing   PG사가 새 도메인으로 이전 → 결제 서비스는 새 도메인으로 배포됐지만 사내 DNS 에 등록 누락
@@ -16,16 +17,11 @@
 #   pg-reset     원래 도메인으로 (다음 테이크 준비)
 #   pg-status    사내 DNS 서버별 조회 결과 + 체크아웃 1건
 #
-# ③ 주 DNS 장애 (주 DNS 파드 삭제 → 보조 DNS 로 정상 동작)
-#   dns-primary-down  주 DNS 파드(ns1-corp-dns-0) 삭제 → 결제·배송 서비스는 보조 DNS(ns2) 로 조회, 서비스 정상
-#   dns-primary-up    주 DNS 파드 다시 기동
-#   dns-status        사내 DNS 파드·서버별 조회 결과 + 체크아웃 1건 + 배송 조회 1건
-#
 #   traffic    부하 발생기 로그 실시간 보기
 source "$(dirname "$0")/lib.sh"
 load_env
 
-NEW_RULE="fw-allow-courier-$(dashed "$COURIER_NEW_IP")"
+SECONDARY_RULE=fw-allow-corp-dns-secondary
 
 corpdns() { "$ROOT/scripts/corpdns.sh" "$@"; }
 
@@ -52,40 +48,38 @@ call_gateway() {
 checkout() { call_gateway "$1" POST /api/checkout '{"memberId":10,"productId":3,"qty":1}'; }
 tracking() { call_gateway "$1" GET /api/orders/1001/tracking; }
 
-# ── ① 방화벽 차단 ─────────────────────────────────────────────
-# 택배사 도메인은 사내 DNS 의 A 레코드 한 줄이다. 택배사가 IP 를 바꾸면 이 레코드가 바뀐다
-set_courier_ip() {
-  info "사내 DNS: ${COURIER_DOMAIN} → $1"
-  corpdns record-add "$COURIER_DOMAIN" "$1" >/dev/null
-}
-
-allow_new_ip() {
-  info "방화벽: ${COURIER_NEW_IP}:443 허용 규칙 추가 (${NEW_RULE})"
+# ── ① 주 DNS 장애 → 보조 DNS 방화벽 차단 ─────────────────────
+allow_secondary_dns() {
+  info "방화벽: 배송 → 사내 보조 DNS(${CORP_DNS_SECONDARY_NAME}) 허용 규칙 추가 (${SECONDARY_RULE})"
   kc apply -f - <<YAML
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: ${NEW_RULE}
+  name: ${SECONDARY_RULE}
   namespace: ${APP_NS}
   labels:
     demo.observ/firewall: egress
   annotations:
-    demo.observ/description: "택배사 API (${COURIER_DOMAIN}) ${COURIER_NEW_IP}:443 허용"
+    demo.observ/description: "사내 보조 DNS (${CORP_DNS_SECONDARY_NAME}) 53 허용"
 spec:
   podSelector:
     matchLabels: { app: delivery-service }
   policyTypes: [Egress]
   egress:
     - to:
-        - ipBlock: { cidr: ${COURIER_NEW_IP}/32 }
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: ${INFRA_NS} }
+          podSelector:
+            matchLabels: { app: corp-dns, dns-role: secondary }
       ports:
-        - { protocol: TCP, port: 443 }
+        - { protocol: UDP, port: 1053 }
+        - { protocol: TCP, port: 1053 }
 YAML
 }
 
-remove_new_ip() {
-  kc -n "$APP_NS" delete netpol "$NEW_RULE" --ignore-not-found >/dev/null
-  info "방화벽: ${COURIER_NEW_IP} 허용 규칙 제거"
+remove_secondary_dns() {
+  kc -n "$APP_NS" delete netpol "$SECONDARY_RULE" --ignore-not-found >/dev/null
+  info "방화벽: 보조 DNS 허용 규칙 제거 (방화벽 신청 때 누락된 상태)"
 }
 
 show_firewall() {
@@ -94,18 +88,21 @@ show_firewall() {
 }
 
 status() {
-  info "사내 DNS 의 택배사 레코드 (서버별 조회)"
-  dns_table "$COURIER_DOMAIN"
+  info "사내 DNS 파드"
+  kc -n "$INFRA_NS" get pods -l app=corp-dns -o custom-columns='POD:.metadata.name,ROLE:.metadata.labels.dns-role,STATUS:.status.phase' 2>/dev/null
+  [[ "$(kc -n "$INFRA_NS" get statefulset "$CORP_DNS_PRIMARY_NAME" -o jsonpath='{.spec.replicas}' 2>/dev/null)" == 0 ]] \
+    && warn "주 DNS 파드 없음 (incident 상태)"
 
-  info "배송 서비스 파드에서 본 DNS 응답과 443 연결 (3초 제한)"
+  info "배송 서비스 파드에서 택배사 도메인 조회와 443 연결 (OS 리졸버 — 주 → 보조 DNS)"
   kc -n "$APP_NS" exec deploy/delivery-service -- python -c "
-import socket
+import socket, time
 host='${COURIER_DOMAIN}'
+t=time.time()
 try:
     ip=socket.gethostbyname(host)
 except OSError as e:
-    print(f'  DNS  {host} 조회 실패 ({e})'); raise SystemExit(0)
-print(f'  DNS  {host} -> {ip}')
+    print(f'  DNS  {host} 조회 실패 ({e}) — {time.time()-t:.1f}초'); raise SystemExit(0)
+print(f'  DNS  {host} -> {ip} ({time.time()-t:.1f}초)')
 try:
     socket.create_connection((ip,443),3).close(); print(f'  TCP  {ip}:443 연결 성공')
 except OSError as e:
@@ -117,6 +114,8 @@ except OSError as e:
 
   info "게이트웨이 → 주문 → 배송을 거친 배송 조회 1건"
   tracking status-check
+  info "체크아웃 1건 (결제 서비스는 방화벽이 없어 보조 DNS 로 정상)"
+  checkout status-checkout
 }
 
 # ── ② DNS 이름 변경 ──────────────────────────────────────────
@@ -139,35 +138,20 @@ pg_status() {
   checkout pg-status-check
 }
 
-# ── ③ 주 DNS 장애 ────────────────────────────────────────────
-dns_status() {
-  info "사내 DNS 파드"
-  kc -n "$INFRA_NS" get pods -l app=corp-dns -o custom-columns='POD:.metadata.name,ROLE:.metadata.labels.dns-role,STATUS:.status.phase' 2>/dev/null
-  [[ "$(kc -n "$INFRA_NS" get statefulset "$CORP_DNS_PRIMARY_NAME" -o jsonpath='{.spec.replicas}' 2>/dev/null)" == 0 ]] \
-    && warn "주 DNS 파드 없음 (dns-primary-down 상태)"
-  info "사내 DNS 서버별 조회"
-  dns_table "$PG_DOMAIN"
-  dns_table "$COURIER_DOMAIN"
-  info "체크아웃 1건 (결제 → PG 도메인 조회)"
-  checkout dns-status-checkout
-  info "배송 조회 1건 (배송 → 택배사 도메인 조회)"
-  tracking dns-status-tracking
-}
-
 case "${1:-}" in
   baseline|reset)
-    remove_new_ip
-    set_courier_ip "$COURIER_OLD_IP"
-    ok "정상 상태: 사내 DNS 택배사 레코드 → ${COURIER_OLD_IP}, 방화벽 → ${COURIER_OLD_IP} 허용"
+    remove_secondary_dns
+    corpdns primary-up
+    ok "정상 상태: 주·보조 DNS 기동, 방화벽 → 주 DNS·택배사(${COURIER_IP}:443) 허용 (보조 DNS 는 등록 누락)"
     ;;
   incident)
-    remove_new_ip
-    set_courier_ip "$COURIER_NEW_IP"
-    ok "사건 발생: 택배사가 IP 를 ${COURIER_NEW_IP} 로 변경. 방화벽에는 ${COURIER_OLD_IP} 만 허용된 상태"
+    remove_secondary_dns
+    corpdns primary-down
+    ok "사건 발생: 주 DNS 장애 → 보조 DNS 로 넘어가지만 배송 서비스는 방화벽에 막혀 택배사 도메인을 못 찾음 (배송 조회 실패)"
     ;;
   fix)
-    allow_new_ip
-    ok "해결: 방화벽에 ${COURIER_NEW_IP}:443 허용 추가"
+    allow_secondary_dns
+    ok "해결: 방화벽에 보조 DNS 허용 추가 — 주 DNS 가 죽은 채로도 배송 조회 회복 (조회마다 주 DNS 타임아웃만큼 느림)"
     ;;
   status)   status ;;
   firewall) show_firewall ;;
@@ -192,16 +176,9 @@ case "${1:-}" in
     ;;
   pg-status) pg_status ;;
 
-  dns-primary-down)
-    corpdns primary-down
-    ok "주 DNS 장애 — 결제·배송 서비스는 보조 DNS 로 조회해 정상 동작합니다 ('./demo.sh dns-status' 로 확인)"
-    ;;
-  dns-primary-up) corpdns primary-up ;;
-  dns-status) dns_status ;;
-
   traffic)  kc -n "$INFRA_NS" logs -f deploy/loadgen --tail=20 ;;
   *)
-    sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
     ;;
 esac

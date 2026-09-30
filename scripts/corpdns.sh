@@ -30,14 +30,14 @@ corp_up() {
   [[ -n "$CORP_DNS_PRIMARY" && -n "$CORP_DNS_SECONDARY" ]] || die "사내 DNS 서비스 ClusterIP 를 가져오지 못했습니다."
   local records; records="$(corp_records)"
   if [[ -z "$records" ]]; then
-    records="${PG_DOMAIN} ${PG_IP}"   # 처음 배포: PG 도메인 + 택배사 도메인(예전 IP)
-    info "존 생성: ${PG_DOMAIN} → ${PG_IP}, ${COURIER_DOMAIN} → ${COURIER_OLD_IP}"
+    records="${PG_DOMAIN} ${PG_IP}"   # 처음 배포: PG 도메인 + 택배사 도메인
+    info "존 생성: ${PG_DOMAIN} → ${PG_IP}, ${COURIER_DOMAIN} → ${COURIER_IP}"
   else
     info "기존 레코드 유지"
   fi
   # 택배사 도메인 레코드가 없으면 예전 IP 로 넣는다
   if ! printf '%s\n' "$records" | awk -v d="$COURIER_DOMAIN" '$1 == d { f = 1 } END { exit !f }'; then
-    records="$(printf '%s\n%s %s' "$records" "$COURIER_DOMAIN" "$COURIER_OLD_IP")"
+    records="$(printf '%s\n%s %s' "$records" "$COURIER_DOMAIN" "$COURIER_IP")"
   fi
   corp_zone_apply "$records"
   if [[ -n "$before" && "$before" != "$after" ]]; then

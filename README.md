@@ -5,7 +5,7 @@
 앱 코드 수정도, 앱별 에이전트 설치도 하지 않은 **일곱 가지 언어로 된 여덟 서비스**에서
 문제를 발견하고, 원인을 좁히고, 해결을 확인하는 데모 환경입니다.
 서비스들은 실제 MSA 처럼 서로 여러 단계로 호출하며(최대 5단계), 모든 서비스가 요청을 받고 다른 서비스를 호출합니다.
-데모 전체가 **배송 조회 실패 사건 하나**로 이어지며, 코드가 아니라 **네트워크**에서 생긴 문제라
+본편은 **배송 조회 실패 사건 하나**로 이어지며, 코드가 아니라 **DNS·방화벽(네트워크)** 에서 생긴 문제라
 eBPF 가 가장 잘 보여줄 수 있는 사건입니다. 화면에 나오는 모든 데이터는 eBPF 노드 에이전트 수집 결과입니다.
 
 - **대상 환경** (둘 다 테스트 완료)
@@ -53,22 +53,22 @@ eBPF 가 가장 잘 보여줄 수 있는 사건입니다. 화면에 나오는 �
 
 | 시각 | 사건 | 데모 | 명령 |
 | --- | --- | --- | --- |
-| 월요일 밤 | 외부 택배사가 API 서버 주소(IP)를 바꾼다. 도메인 이름은 그대로 | — | `./demo.sh incident` |
-| 화요일 09:00 | "배송 조회가 자주 실패한다"는 문의. 배송팀 코드는 바뀐 것이 없다 | — | |
-| 화요일 09:10 | 토폴로지 맵에서 택배사 API 로 가는 연결만 실패하는 것을 발견 | 데모 1 | |
-| 화요일 09:20 | DNS 는 정상, 새 IP 로의 연결이 실패 → 방화벽에 새 IP 가 없음 | 데모 2, 3 | `./demo.sh firewall` |
-| 화요일 09:40 | 방화벽 허용 후 실패 연결이 없어진 것 확인 | 데모 4 | `./demo.sh fix` |
+| 월요일 밤 | 사내 **주 DNS 서버가 죽는다.** 보조 DNS 가 있으니 서비스는 괜찮을 줄 알았다 | — | `./demo.sh incident` |
+| 화요일 09:00 | "배송 조회가 전부 실패한다"는 문의. 결제·상품 등 다른 기능은 정상. 배송팀 코드는 바뀐 것이 없다 | — | |
+| 화요일 09:10 | eBPF: 배송 서비스 구간만 5xx, **택배사로 가는 연결은 아예 시도조차 없음** | 데모 1 | |
+| 화요일 09:20 | 배송 서비스 DNS 탭: 택배사 도메인 조회가 **응답 없이 실패**, 질의가 보조 DNS 로 가고 있음 → 방화벽에 **보조 DNS 가 등록되지 않음** | 데모 2, 3 | `./demo.sh firewall` |
+| 화요일 09:40 | 방화벽에 보조 DNS 허용 → 주 DNS 가 아직 복구 중인데도 배송 조회 회복 | 데모 4 | `./demo.sh fix` |
 | 다음 주 | 여덟 서비스를 같은 기준으로 보는 공통 대시보드로 표준화 | 데모 4 | |
 
-외부 택배사·PG사 도메인은 클러스터 DNS 가 아니라 **사내 DNS(주·보조)** 로 조회합니다. 데모 시나리오는 3개입니다.
+외부 택배사·PG사 도메인은 클러스터 DNS 가 아니라 **사내 DNS(주·보조)** 로 조회합니다. 데모 시나리오는 2개입니다.
 
 | # | 시나리오 | 장애가 나는 곳 | 사건 → 해결 | 앱에 찍히는 예외 |
 | --- | --- | --- | --- | --- |
-| ① | **방화벽 차단** (본편) | 배송 (Python) → 외부 택배사 | 택배사가 IP 변경(사내 DNS 레코드 → 새 IP), 방화벽엔 예전 IP 만 → **방화벽 허용** | `TimeoutError: timed out` (연결 5초 타임아웃) |
+| ① | **주 DNS 장애 → 보조 DNS 가 방화벽에 막힘** (본편) | 배송 (Python) → 외부 택배사 | 주 DNS 파드 삭제 → 보조 DNS 로 넘어가지만 배송 서비스 방화벽엔 주 DNS 만 등록 → **방화벽에 보조 DNS 허용** | `socket.gaierror: [Errno -3] Temporary failure in name resolution` |
 | ② | **DNS 이름 변경 → 없는 이름 조회** | 결제 (Node.js) → 외부 PG사 | PG 새 도메인으로 바꿨지만 사내 DNS 에 없음 → **사내 DNS 에 등록** | `Error: getaddrinfo ENOTFOUND api-new.pg.example` |
-| ③ | **주 DNS 장애** | 사내 주 DNS | 주 DNS 파드 삭제 → **보조 DNS 로 정상 동작** (장애 없음) | 없음 — 사내 DNS 로그·eBPF DNS 탭으로 전환 확인 |
 
-②·③ 은 [6-2](#6-2-시나리오-2--dns-이름-변경-없는-이름-조회), [6-3](#6-3-시나리오-3--주-dns-장애) 에 있습니다.
+- ① 에서 결제 서비스도 주 DNS 를 잃지만, 결제 서비스에는 나가는 방화벽이 없어 **보조 DNS 로 정상 동작**합니다 → 고장은 배송 한 곳.
+- ② 는 [6-2](#6-2-시나리오-2--dns-이름-변경-없는-이름-조회) 에 있습니다.
 
 ---
 
@@ -101,10 +101,13 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  subgraph K["클러스터 (demo-shop)"]
+  subgraph K1["배송 서비스 (나가는 방화벽 있음)"]
     DLV["배송 · Python"]
-    PAY["결제 · Node.js"]
     FW{{"방화벽<br/>NetworkPolicy"}}
+  end
+
+  subgraph K2["결제 서비스 (나가는 방화벽 없음)"]
+    PAY["결제 · Node.js"]
   end
 
   subgraph C["사내 DNS (demo-infra 파드)"]
@@ -113,40 +116,38 @@ flowchart LR
   end
 
   subgraph N["외부 API 호스트 (nginx)"]
-    COLD["택배사 API<br/>예전 IP:443"]
-    CNEW["택배사 API<br/>새 IP:443"]
+    CAPI["택배사 API<br/>COURIER_IP:443"]
     PGAPI["PG사 API<br/>PG_IP:443"]
   end
 
-  DLV -->|"① 택배사 도메인 조회"| D1
-  PAY -->|"① PG 도메인 조회"| D1
-  PAY -.->|"주 DNS 파드가 없을 때"| D2
-  DLV -.-> D2
-  D1 -.->|"존 복제"| D2
+  DLV --> FW
+  FW -->|"① DNS 조회 허용"| D1
+  FW -.->|"보조 DNS 차단 (등록 누락)"| D2
+  FW -->|"② 연결 허용"| CAPI
 
-  DLV -->|"② 연결"| FW
-  FW -->|"허용"| COLD
-  FW -.->|"차단"| CNEW
+  PAY -->|"① PG 도메인 조회"| D1
+  PAY -.->|"주 DNS 가 없을 때"| D2
+  D1 -.->|"존 복제"| D2
   PAY -->|"② 승인 HTTPS"| PGAPI
 
   classDef courier fill:#fff1e0,stroke:#e8590c,color:#000
   classDef pg fill:#e7f0ff,stroke:#1c7ed6,color:#000
   classDef dns fill:#f1f3f5,stroke:#495057,color:#000
-  class DLV,FW,COLD,CNEW courier
+  class DLV,FW,CAPI courier
   class PAY,PGAPI pg
   class D1,D2 dns
 ```
 
-주황 = **시나리오 ① 방화벽 차단**, 파랑 = **시나리오 ② DNS 이름 변경**, 회색 = 사내 DNS (**시나리오 ③ 주 DNS 장애**).
+주황 = **시나리오 ① 주 DNS 장애 → 보조 DNS 방화벽 차단**, 파랑 = **시나리오 ② DNS 이름 변경**, 회색 = 사내 DNS.
+배송 서비스의 방화벽에는 **주 DNS 만** 등록돼 있고 보조 DNS 는 빠져 있습니다 (평소에는 주 DNS 가 답하므로 아무도 모름).
 
 택배사 도메인과 PG 도메인은 모두 **사내 DNS 에 A 레코드**로 있습니다. 결제·배송 서비스 파드는 사내 DNS 주·보조를 DNS 서버로 쓰고
 (`/etc/resolv.conf`), 앱은 평범하게 OS 리졸버로 조회합니다. 주 DNS 가 없으면 OS 리졸버가 보조 DNS 에 묻습니다.
 
 | 시나리오 | 장애가 나는 서비스 | 도메인 조회 | 외부 목적지 | 장애를 만드는 장치 | 명령 |
 | --- | --- | --- | --- | --- | --- |
-| ① 방화벽 차단 | 배송 (Python) | 사내 DNS — 택배사 레코드 (`incident` 가 새 IP 로 바꿈) | nginx 의 택배사 API (예전 IP / 새 IP) | 방화벽(NetworkPolicy)에 새 IP 없음 | `incident` → `firewall` → `fix` |
+| ① 주 DNS 장애 → 보조 DNS 방화벽 차단 | 배송 (Python) | 사내 DNS — 주 DNS 파드 없음 → 보조 DNS 는 방화벽에 막힘 | nginx 의 택배사 API (`COURIER_IP`) | 주 DNS 파드 삭제 + 방화벽에 보조 DNS 없음 | `incident` → `firewall` → `fix` |
 | ② DNS 이름 변경 | 결제 (Node.js) | 사내 DNS — 새 PG 도메인 레코드 없음 | nginx 의 PG사 API (`PG_IP`) | 결제 서비스의 PG 도메인을 사내 DNS 에 없는 이름으로 교체 | `pg-missing` → `pg-register` |
-| ③ 주 DNS 장애 | 없음 (보조가 응답) | 사내 DNS — 주 DNS 파드 없음 → 보조 | — | 주 DNS 파드 삭제 | `dns-primary-down` → `dns-primary-up` |
 
 ### 사용자 요청별 호출 경로
 
@@ -217,11 +218,13 @@ oc -n demo-shop logs deploy/delivery-service --since=1m | jq -r 'select(.level==
 데모 사건(`incident`) 중 배송 조회 1건이 남기는 로그 (위에서 아래로 = 바깥에서 안쪽으로, `stack` 은 줄임):
 
 ```
-{"ts":"…","level":"WARN","service":"gateway-service","msg":"upstream call failed","req":"lg-3fa9c1d2e8b0","target":"order-service","call":"GET http://order-service:8080/orders/1374/delivery","status":502,"elapsedMs":5098,"step":"tracking","orderId":1374,"path":"gateway-service → order-service[502] → delivery-service[503] → api.courier.example(10.0.0.62:443) [connect: timed out after 5.01s]"}
-{"ts":"…","level":"WARN","service":"order-service","msg":"upstream call failed","req":"lg-3fa9c1d2e8b0","target":"delivery-service","call":"GET http://delivery-service:8080/deliveries/1374/tracking","status":503,"elapsedMs":5059,"path":"order-service → delivery-service[503] → api.courier.example(10.0.0.62:443) [connect: timed out after 5.01s]","orderId":1374}
-{"ts":"…","level":"ERROR","service":"delivery-service","msg":"upstream call failed","req":"lg-3fa9c1d2e8b0","target":"api.courier.example","call":"GET https://api.courier.example/v1/tracking/DX1512686139","ip":"10.0.0.62","stage":"connect","elapsedMs":5006,"orderId":1374,"path":"delivery-service → api.courier.example(10.0.0.62:443) [connect: timed out after 5.01s]","error":"TimeoutError('timed out')","stack":"Traceback (most recent call last):\n  File \"/app/app.py\", line 100, in call_courier\n …\nTimeoutError: timed out\n"}
+{"ts":"…","level":"WARN","service":"gateway-service","msg":"upstream call failed","req":"lg-3fa9c1d2e8b0","target":"order-service","call":"GET http://order-service:8080/orders/1374/delivery","status":502,"elapsedMs":4052,"step":"tracking","orderId":1374,"path":"gateway-service → order-service[502] → delivery-service[503] → api.courier.example(-:443) [dns: [Errno -3] Temporary failure in name resolution after 4.01s]"}
+{"ts":"…","level":"WARN","service":"order-service","msg":"upstream call failed","req":"lg-3fa9c1d2e8b0","target":"delivery-service","call":"GET http://delivery-service:8080/deliveries/1374/tracking","status":503,"elapsedMs":4031,"path":"order-service → delivery-service[503] → api.courier.example(-:443) [dns: [Errno -3] Temporary failure in name resolution after 4.01s]","orderId":1374}
+{"ts":"…","level":"ERROR","service":"delivery-service","msg":"upstream call failed","req":"lg-3fa9c1d2e8b0","target":"api.courier.example","call":"GET https://api.courier.example/v1/tracking/DX1512686139","ip":"-","stage":"dns","elapsedMs":4010,"orderId":1374,"path":"delivery-service → api.courier.example(-:443) [dns: [Errno -3] Temporary failure in name resolution after 4.01s]","error":"gaierror(-3, 'Temporary failure in name resolution')","stack":"Traceback (most recent call last):\n  File \"/app/app.py\", line 96, in call_courier\n …\nsocket.gaierror: [Errno -3] Temporary failure in name resolution\n"}
 ```
 
+- `ip: "-"`, `stage: "dns"` — IP 를 얻지 못해 **택배사로 연결을 시도조차 못 했다**는 뜻입니다. `elapsedMs` 약 4초 = 주 DNS 2초 + 보조 DNS 2초 타임아웃
+  (CNI 가 주 DNS 서비스로 가는 패킷을 즉시 거부하면 약 2초).
 - `path` 의 `서비스[코드]` 는 그 서비스가 돌려준 HTTP 응답 코드, 마지막 `[…]` 는 실제로 실패한 원인입니다.
 - **예외가 실제로 난 곳**(연결 타임아웃·연결 거부·DB 오류)은 `error`·`stack` 필드에 예외와 스택 트레이스를 남깁니다: Python(배송), Java(주문·회원), C#(게이트웨이), Ruby(재고), Node.js(결제).
 - 요청 ID 는 loadgen 이 `lg-…` 로 붙이고(없으면 게이트웨이가 만듦) 모든 서비스가 다음 호출에 그대로 넘깁니다. `./demo.sh traffic` 에 요청 ID 가 찍히므로, 그 ID 로 서비스 로그를 검색하면 됩니다.
@@ -231,7 +234,8 @@ oc -n demo-shop logs deploy/delivery-service --since=1m | jq -r 'select(.level==
 
 | 장애 | 게이트웨이 로그의 `path` |
 | --- | --- |
-| 택배사 새 IP 차단 (데모 사건) | `gateway-service → order-service[502] → delivery-service[503] → api.courier.example(10.0.0.62:443) [connect: timed out after 5.01s]` |
+| 주 DNS 장애 + 보조 DNS 방화벽 차단 (데모 사건) | `gateway-service → order-service[502] → delivery-service[503] → api.courier.example(-:443) [dns: [Errno -3] Temporary failure in name resolution after 4.01s]` |
+| 택배사 API 연결 실패 (방화벽에 택배사 IP 없음 등) | `gateway-service → order-service[502] → delivery-service[503] → api.courier.example(10.0.0.61:443) [connect: timed out after 5.01s]` |
 | MySQL 다운 | `gateway-service → order-service[502] → member-service[500] → mysql(mysql:3306) [CommunicationsException: Communications link failure]` |
 | Redis 다운 | `gateway-service → order-service[502] → inventory-service[503] → redis(redis:6379) [redis unavailable: …]` |
 | 결제 서비스 다운 | `gateway-service → order-service[504] → payment-service [HttpConnectTimeoutException: HTTP connect timed out after 2004ms]` |
@@ -252,21 +256,20 @@ for d in gateway-service order-service delivery-service; do oc -n demo-shop logs
 | --- | --- | --- |
 | 여덟 서비스 + MySQL + Redis | 쇼핑몰 | `demo-shop` 네임스페이스. 모니터링 코드·에이전트 없음 |
 | `loadgen` | 사용자 트래픽 | 게이트웨이로 체크아웃·배송 조회·둘러보기를 1초 간격으로 호출 (`demo-infra`) |
-| `fw-*` NetworkPolicy | 사내 방화벽 | 배송 서비스의 나가는 연결 허용 목록. 택배사 예전 IP 만 허용 |
-| 외부 API 호스트 (`courier-ext/`) | 외부 택배사 API + 외부 PG사 API | 클러스터 **밖** 리눅스 호스트의 nginx 1대(HTTPS). 요청 도메인(TLS SNI)으로 택배사·PG 를 구분해 응답. 택배사는 예전 IP·새 IP, PG 는 `PG_IP`(기본: 택배사 예전 IP) |
-| 사내 DNS 주·보조 | 회사의 DNS 서버 2대 | 택배사 도메인(배송 서비스)과 PG 도메인(결제 서비스)을 답함. 택배사 레코드는 IP **1개**, `incident` 가 새 IP 로 바꿈. `cluster.local` 은 클러스터 DNS 로 전달 (결제 서비스가 회원 서비스를 찾도록). `demo-infra` 의 CoreDNS 파드 `ns1-corp-dns-0`(주)·`ns2-corp-dns-0`(보조) — [5-5b](#5-5b-사내-dns--준비할-것-없음) |
+| `fw-*` NetworkPolicy | 사내 방화벽 | 배송 서비스의 나가는 연결 허용 목록. **사내 주 DNS** 와 택배사 API 만 허용 (보조 DNS 는 등록 누락) |
+| 외부 API 호스트 (`courier-ext/`) | 외부 택배사 API + 외부 PG사 API | 클러스터 **밖** 리눅스 호스트의 nginx 1대(HTTPS). 요청 도메인(TLS SNI)으로 택배사·PG 를 구분해 응답. 택배사는 `COURIER_IP`, PG 는 `PG_IP`(기본: `COURIER_IP`) |
+| 사내 DNS 주·보조 | 회사의 DNS 서버 2대 | 택배사 도메인(배송 서비스)과 PG 도메인(결제 서비스)을 답함. 택배사 레코드는 IP **1개**. `cluster.local` 은 클러스터 DNS 로 전달 (결제 서비스가 회원 서비스를 찾도록). `demo-infra` 의 CoreDNS 파드 `ns1-corp-dns-0`(주)·`ns2-corp-dns-0`(보조) — [5-5b](#5-5b-사내-dns--준비할-것-없음) |
 
-**장애가 나는 원리**: DNS 가 새 IP 를 돌려주면 배송 서비스가 새 IP 로 TCP 연결을 시도합니다.
-방화벽(NetworkPolicy)이 SYN 을 조용히 버리므로 연결은 5초 뒤 타임아웃되고, 배송 서비스는 주문 서비스에 503,
-주문 서비스는 게이트웨이에 502, 게이트웨이는 사용자에게 502 를 돌려줍니다. eBPF 는 이것을
-**실패한 TCP 연결(목적지 = 새 IP:443)** 과 **약 5초 걸린 5xx HTTP 요청**(주문→배송, 게이트웨이→주문 구간)으로 봅니다.
-체크아웃·상품·회원 요청은 배송과 무관하므로 장애 중에도 정상입니다.
+**장애가 나는 원리 (①)**: 배송·결제 서비스의 OS 리졸버는 `/etc/resolv.conf` 의 주 DNS 에 먼저 묻고, 응답이 없으면 보조 DNS 에 묻습니다
+(`timeout:2 attempts:1`). 주 DNS 파드가 없어지면 두 서비스 모두 보조 DNS 로 넘어가는데,
+배송 서비스의 방화벽(NetworkPolicy)은 보조 DNS 로 가는 질의를 조용히 버립니다. 리졸버는 답을 못 받고
+`Temporary failure in name resolution`(EAI_AGAIN)으로 실패 → 배송 503 → 주문 502 → 게이트웨이 502 가 됩니다.
+eBPF 는 이것을 배송 서비스 **DNS 탭의 응답 없는 질의(타임아웃)** 와 5xx HTTP 요청(주문→배송, 게이트웨이→주문 구간)으로 보고,
+택배사 IP 로 가는 TCP 연결이 **아예 없어진 것**도 보여줍니다. 결제·상품·회원 요청은 정상입니다.
 
-**DNS 시나리오의 원리**: 결제·배송 서비스의 OS 리졸버는 사내 주 DNS 에 먼저 묻습니다.
-- **② 이름이 없으면** 주 DNS 가 **NXDOMAIN**(확정 답)을 돌려주고, 보조로 넘어가지 않고 곧바로 실패합니다 → 결제 504 → 주문 502 → 게이트웨이 502.
-  eBPF 는 결제 서비스 DNS 탭의 **NXDOMAIN 증가**와 체크아웃 5xx 로 봅니다.
-- **③ 주 DNS 가 없으면** 리졸버가 보조 DNS 에 묻고 정상 응답을 받습니다 → 서비스는 정상. 전환은 사내 DNS 로그와 DNS 탭으로 봅니다.
-자세한 흐름은 [6-2](#6-2-시나리오-2--dns-이름-변경-없는-이름-조회), [6-3](#6-3-시나리오-3--주-dns-장애).
+**장애가 나는 원리 (②)**: 결제 서비스의 OS 리졸버가 주 DNS 에 새 PG 도메인을 물으면 **NXDOMAIN**(확정 답)이 돌아오고,
+보조로 넘어가지 않고 곧바로 실패합니다 → 결제 504 → 주문 502 → 게이트웨이 502. eBPF 는 결제 서비스 DNS 탭의 **NXDOMAIN 증가**와 체크아웃 5xx 로 봅니다.
+자세한 흐름은 [6-2](#6-2-시나리오-2--dns-이름-변경-없는-이름-조회).
 
 ---
 
@@ -291,7 +294,7 @@ for d in gateway-service order-service delivery-service; do oc -n demo-shop logs
 | 5-9 배포 | 작업 PC | `./demo.sh deploy` | 처음·매니페스트 변경 때 |
 | 5-10 확인 | 작업 PC | `./demo.sh security` → `./demo.sh status` | 배포 후 |
 | 5-11 정상 데이터 쌓기 | — | 몇 시간 이상 그대로 둠 | 촬영 전날 |
-| 6 촬영 | 작업 PC | ① `incident` → `firewall` → `fix` → `reset` / ② `pg-missing` → `pg-register` → `pg-reset` / ③ `dns-primary-down` → `dns-primary-up` | 테이크마다 |
+| 6 촬영 | 작업 PC | ① `incident` → `firewall` → `fix` → `reset` / ② `pg-missing` → `pg-register` → `pg-reset` | 테이크마다 |
 
 ---
 
@@ -328,19 +331,16 @@ for d in gateway-service order-service delivery-service; do oc -n demo-shop logs
 | 항목 | 조건 |
 | --- | --- |
 | 서버 | 클러스터 **밖** 리눅스 1대 (VM 가능, RHEL·Ubuntu 등) |
-| IP | **2개** — 기본 IP(= 예전 IP) + 보조 IP(= 새 IP). 클러스터 노드에서 두 IP 의 443 으로 연결 가능해야 함 |
+| IP | **1개** (`COURIER_IP`) — 호스트의 기본 IP, 또는 다른 서비스와 443 을 나눠 쓰면 보조 IP 1개. 클러스터 노드에서 그 IP 의 443 으로 연결 가능해야 함 |
 | 컨테이너 | `podman` 또는 `docker` |
 | 포트 | 443/TCP 열림 |
 
-택배사 호스트의 nginx 는 **외부 PG사 API 도 함께 응답**합니다 (TLS SNI 로 구분). PG 도메인은 `PG_IP`(기본: 택배사 예전 IP)를 가리킵니다.
+택배사 호스트의 nginx 는 **외부 PG사 API 도 함께 응답**합니다 (TLS SNI 로 구분). PG 도메인은 `PG_IP`(기본: `COURIER_IP`)를 가리킵니다.
 
 ### 사내 DNS
 
 준비할 것이 없습니다. `./demo.sh deploy` 가 `demo-infra` 네임스페이스에 사내 DNS 주·보조를 **파드로** 띄웁니다
 (`ns1-corp-dns-0` 주, `ns2-corp-dns-0` 보조). 존에는 PG 도메인과 택배사 도메인이 A 레코드로 들어갑니다.
-
-> **예전 IP·새 IP 고르기**: 택배사 호스트의 현재 IP 를 예전 IP 로, 같은 서브넷에서 비어 있는 IP 하나를 새 IP 로
-> 정하면 됩니다. 네트워크 담당자에게 사용 가능한 IP 를 확인하세요.
 
 ---
 
@@ -388,12 +388,13 @@ cp demo.env.example demo.env
 vi demo.env
 ```
 
-**보통은 IP 두 개만 바꾸면 됩니다.**
+**보통은 IP 하나만 바꾸면 됩니다.**
 
 ```bash
-COURIER_OLD_IP=10.0.0.61     # 택배사 호스트의 기본 IP
-COURIER_NEW_IP=10.0.0.62     # 택배사 호스트에 새로 붙일 보조 IP
+COURIER_IP=10.0.0.61     # 택배사 API(nginx) IP = 택배사 호스트의 IP
 ```
+
+(예전 버전의 `COURIER_OLD_IP` 도 그대로 읽습니다. `COURIER_NEW_IP` 는 더 이상 쓰지 않습니다.)
 
 나머지 값(기본값 그대로 두면 됨):
 
@@ -407,7 +408,7 @@ COURIER_NEW_IP=10.0.0.62     # 택배사 호스트에 새로 붙일 보조 IP
 | `REGISTRY_TLS_VERIFY` | `false` | default route 인증서 검증. OCP 기본 인그레스 인증서는 보통 사설이라 `false` |
 | `PLATFORM` | `linux/amd64` | 클러스터 노드 아키텍처 |
 | `PG_DOMAIN` | `api.pg.example` | 외부 PG사 도메인 (공인 DNS 등록 불필요) |
-| `PG_IP` | (비움 = `COURIER_OLD_IP`) | PG 도메인이 가리킬 IP. 택배사 호스트 nginx 가 PG 도 응답 |
+| `PG_IP` | (비움 = `COURIER_IP`) | PG 도메인이 가리킬 IP. 택배사 호스트 nginx 가 PG 도 응답 |
 | `PG_UNREGISTERED_DOMAIN` | `api-new.pg.example` | 시나리오 ② 에서 결제 서비스가 바꿔 쓸 새 PG 도메인. **PG 도메인과 같은 존 안의, 처음엔 사내 DNS 에 없는 이름** |
 | `LOADGEN_REPLICAS` | `1` | 부하 발생기 파드 수 (파드 1개 = 초당 체크아웃·배송 조회·둘러보기 각 1건) — [6-1](#6-1-요청량-늘리기) |
 | `LOADGEN_*_INTERVAL` | `1` | 파드 하나의 요청 간격(초) |
@@ -436,8 +437,7 @@ scp -r courier-ext <사용자>@<택배사 호스트>:~/
 
 ```bash
 cd ~/courier-ext
-ip -4 -brief addr                                 # NIC 이름과 기본 IP(= COURIER_OLD_IP) 확인
-sudo ./setup-ips.sh add <NIC> <COURIER_NEW_IP>/<prefix>   # 예) sudo ./setup-ips.sh add eth0 10.0.0.62/24
+ip -4 -brief addr                                 # NIC 이름과 기본 IP(= COURIER_IP) 확인
 sudo ./run.sh up                                  # nginx 기동 (podman 우선, 없으면 docker)
 ```
 
@@ -449,11 +449,10 @@ sudo firewall-cmd --add-service=https --permanent && sudo firewall-cmd --reload 
 # sudo ufw allow 443/tcp                                                           # Ubuntu
 ```
 
-④ 두 IP 모두 응답하는지 확인합니다:
+④ 응답하는지 확인합니다:
 
 ```bash
-curl -sk --resolve api.courier.example:443:<COURIER_OLD_IP> https://api.courier.example/v1/tracking/T1
-curl -sk --resolve api.courier.example:443:<COURIER_NEW_IP> https://api.courier.example/v1/tracking/T1
+curl -sk --resolve api.courier.example:443:<COURIER_IP> https://api.courier.example/v1/tracking/T1
 # {"trackingNo":"T1",...,"served_by":"<접속한 IP>"}
 ```
 
@@ -462,13 +461,13 @@ curl -sk --resolve api.courier.example:443:<COURIER_NEW_IP> https://api.courier.
 - 443 은 특권 포트라 `sudo` 로 실행합니다 (rootless podman 은 443 바인딩 불가).
 - `run.sh` 는 SELinux 라벨(`:Z`)을 붙여 볼륨을 마운트하므로 RHEL 에서도 인증서를 읽을 수 있습니다.
 - `ip addr` 로 붙인 보조 IP 는 **재부팅하면 사라집니다**. 촬영 기간 동안 유지하려면 `nmcli` 로 영구 설정하세요:
-  `sudo nmcli con mod <연결이름> +ipv4.addresses 10.0.0.62/24 && sudo nmcli con up <연결이름>`
+  `sudo nmcli con mod <연결이름> +ipv4.addresses 10.0.0.61/24 && sudo nmcli con up <연결이름>`
 - 기타: `sudo ./run.sh status | logs | down`
 
 #### 443 을 이미 다른 프로그램이 쓰고 있을 때
 
 택배사 호스트로 bastion 처럼 다른 서비스가 도는 서버를 쓰면, haproxy·nginx·httpd 등이 이미 443 을 쓰고 있을 수 있습니다.
-택배사 nginx 는 **택배사 IP 2개의 443 만** 써야 하고, 기존 프로그램은 **자기 IP 의 443 만** 쓰도록 나눕니다.
+택배사 nginx 는 **택배사 IP 의 443 만** 써야 하고, 기존 프로그램은 **자기 IP 의 443 만** 쓰도록 나눕니다.
 
 **1. 누가 443 을 어떻게 쓰는지 확인**
 
@@ -479,7 +478,7 @@ sudo ss -ltnp | grep ':443 '
 | 출력 | 의미 | 할 일 |
 | --- | --- | --- |
 | 아무것도 없음 | 443 이 비어 있음 | 위 ②~④ 그대로 진행 |
-| `10.0.0.50:443 … ("haproxy",…)` 처럼 **특정 IP** | 그 IP 만 쓰는 중 | 기존 프로그램은 그대로. 택배사용 IP 2개를 **새로** 붙이고 아래 3~4 진행 |
+| `10.0.0.50:443 … ("haproxy",…)` 처럼 **특정 IP** | 그 IP 만 쓰는 중 | 기존 프로그램은 그대로. 택배사용 IP 1개를 **새로** 붙이고 아래 3~4 진행 |
 | `0.0.0.0:443` 또는 `*:443` | **모든 IP** 의 443 을 쓰는 중 → 택배사 nginx 가 뜰 수 없음 | 아래 2 로 기존 프로그램의 bind 를 자기 IP 로 좁힌 뒤 3~4 진행 |
 
 **2. 기존 프로그램의 443 을 자기 IP 로 좁히기** (예: bastion 의 haproxy)
@@ -489,8 +488,7 @@ sudo ss -ltnp | grep ':443 '
 | 항목 | 값 |
 | --- | --- |
 | bastion 기존 IP (`*.apps` 인그레스가 들어오는 IP) | `10.0.0.50` |
-| 택배사 예전 IP (`COURIER_OLD_IP`) — 새로 붙임 | `10.0.0.61` |
-| 택배사 새 IP (`COURIER_NEW_IP`) — 새로 붙임 | `10.0.0.62` |
+| 택배사 IP (`COURIER_IP`) — 새로 붙임 | `10.0.0.61` |
 | NIC / prefix | `ens192` / `/24` |
 
 `*.apps` 가 어느 IP 로 들어오는지 먼저 확인합니다 (그 IP 가 기존 프로그램이 계속 받아야 하는 IP):
@@ -529,41 +527,39 @@ haproxy 가 아닌 경우도 같은 방식입니다:
 
 변경 후 각각 설정 검증(`nginx -t`, `apachectl configtest`) → 재시작 → `ss -ltnp | grep ':443 '` 로 확인합니다.
 
-**3. 택배사 IP 2개 붙이기**
+**3. 택배사 IP 붙이기**
 
-같은 대역에서 **아무도 안 쓰는 IP** 2개를 고릅니다 (노드 IP 와 겹치지 않는지 `oc get nodes -o wide`, 응답 없는지 `ping`):
+같은 대역에서 **아무도 안 쓰는 IP** 1개를 고릅니다 (노드 IP 와 겹치지 않는지 `oc get nodes -o wide`, 응답 없는지 `ping`):
 
 ```bash
-ping -c 2 -W 1 10.0.0.61; ping -c 2 -W 1 10.0.0.62      # 100% packet loss 여야 함
+ping -c 2 -W 1 10.0.0.61      # 100% packet loss 여야 함
 sudo ./courier-ext/setup-ips.sh add ens192 10.0.0.61/24
-sudo ./courier-ext/setup-ips.sh add ens192 10.0.0.62/24
 ip -4 -brief addr show ens192
-# ens192  UP  10.0.0.50/24 10.0.0.61/24 10.0.0.62/24
+# ens192  UP  10.0.0.50/24 10.0.0.61/24
 ```
 
-`demo.env` 에 두 IP 를 넣습니다:
+`demo.env` 에 IP 를 넣습니다:
 
 ```bash
-COURIER_OLD_IP=10.0.0.61
-COURIER_NEW_IP=10.0.0.62
+COURIER_IP=10.0.0.61
 ```
 
-**4. 택배사 nginx 를 두 IP 에서만 띄우기**
+**4. 택배사 nginx 를 그 IP 에서만 띄우기**
 
 `run.sh` 는 nginx 가 받을 IP 를 이렇게 정합니다:
 
 1. `LISTEN_IPS` 환경변수가 있으면 그 IP 들
-2. 없으면 같은 저장소의 `demo.env` 에 있는 `COURIER_OLD_IP`, `COURIER_NEW_IP` (작업 PC = 택배사 호스트일 때)
+2. 없으면 같은 저장소의 `demo.env` 에 있는 `COURIER_IP` (와 다르면 `PG_IP`) (작업 PC = 택배사 호스트일 때)
 3. 둘 다 없으면 모든 IP (`0.0.0.0:443`)
 
 ```bash
 # 저장소 안에서 실행 (demo.env 를 읽음)
 sudo ./courier-ext/run.sh up
-# listen: 10.0.0.61:443, 10.0.0.62:443
+# listen: 10.0.0.61:443
 # [podman] courier-api started.
 
 # courier-ext 만 복사해 온 다른 서버라면 IP 를 직접 지정
-sudo LISTEN_IPS="10.0.0.61 10.0.0.62" ./run.sh up
+sudo LISTEN_IPS="10.0.0.61" ./run.sh up
 ```
 
 확인 — 기존 프로그램과 택배사 nginx 가 443 을 나눠 쓰는지:
@@ -572,16 +568,14 @@ sudo LISTEN_IPS="10.0.0.61 10.0.0.62" ./run.sh up
 sudo ss -ltnp | grep ':443 '
 # 10.0.0.50:443   haproxy
 # 10.0.0.61:443   nginx
-# 10.0.0.62:443   nginx
 curl -sk --resolve api.courier.example:443:10.0.0.61 https://api.courier.example/v1/tracking/T1   # served_by 10.0.0.61
-curl -sk --resolve api.courier.example:443:10.0.0.62 https://api.courier.example/v1/tracking/T1   # served_by 10.0.0.62
 ```
 
 지정한 IP 가 호스트에 붙어 있지 않으면 `run.sh` 가 `ERROR: … 가 이 호스트에 없습니다` 로 멈춥니다 (3 을 먼저 할 것).
 
 #### 주의: 같은 IP 를 두 서버에 붙이지 마세요
 
-택배사·PG 용 IP(`COURIER_OLD_IP`·`COURIER_NEW_IP`)와 nginx 는 **한 서버에만** 둡니다. 두 서버에 같은 IP 가 있으면 ARP 응답이 번갈아 바뀌어 연결이 됐다 안 됐다 합니다.
+택배사·PG 용 IP(`COURIER_IP`)와 nginx 는 **한 서버에만** 둡니다. 두 서버에 같은 IP 가 있으면 ARP 응답이 번갈아 바뀌어 연결이 됐다 안 됐다 합니다.
 
 ```bash
 ip -4 -brief addr | grep '10.0.0.6'      # 각 서버에서 — 데모용 IP 가 한 서버에만 있어야 함
@@ -592,8 +586,7 @@ ip -4 -brief addr | grep '10.0.0.6'      # 각 서버에서 — 데모용 IP 가
 ```bash
 ./courier-ext/run.sh down
 ./courier-ext/setup-ips.sh del <NIC> 10.0.0.61/<prefix>
-./courier-ext/setup-ips.sh del <NIC> 10.0.0.62/<prefix>
-nmcli con mod <연결이름> -ipv4.addresses 10.0.0.61/<prefix> -ipv4.addresses 10.0.0.62/<prefix>   # 영구 설정했다면
+nmcli con mod <연결이름> -ipv4.addresses 10.0.0.61/<prefix>   # 영구 설정했다면
 ```
 
 ### 5-5b. 사내 DNS — 준비할 것 없음
@@ -605,7 +598,7 @@ nmcli con mod <연결이름> -ipv4.addresses 10.0.0.61/<prefix> -ipv4.addresses 
 | --- | --- |
 | 파드 `ns1-corp-dns-0` / 서비스 `ns1-corp-dns` | **주 DNS** — 결제·배송 서비스가 먼저 묻는 서버 |
 | 파드 `ns2-corp-dns-0` / 서비스 `ns2-corp-dns` | **보조 DNS** — 주 DNS 가 없을 때 OS 리졸버가 묻는 서버 |
-| ConfigMap `corp-dns-zone` | 두 서버가 함께 읽는 존 (= 주 → 보조 존 복제가 끝난 상태). 처음 레코드: PG 도메인 → `PG_IP`, 택배사 도메인 → 예전 IP. 등록되지 않은 이름은 NXDOMAIN. `incident`/`reset`·`pg-register` 등이 바꿈 (약 3초 안에 반영) |
+| ConfigMap `corp-dns-zone` | 두 서버가 함께 읽는 존 (= 주 → 보조 존 복제가 끝난 상태). 처음 레코드: PG 도메인 → `PG_IP`, 택배사 도메인 → `COURIER_IP`. 등록되지 않은 이름은 NXDOMAIN. `pg-register`·`corpdns record-add/remove` 가 바꿈 (약 3초 안에 반영) |
 | `cluster.local` 전달 | 사내 DNS 가 클러스터 이름(예: `member-service.demo-shop.svc.cluster.local`)은 클러스터 DNS 로 전달 — 결제 서비스가 회원 서비스를 찾을 수 있게 |
 | NetworkPolicy `allow-corp-dns-from-clients` | `demo-infra` 는 인바운드 기본 차단이라 결제·배송 서비스 → 사내 DNS 만 허용 |
 
@@ -650,7 +643,7 @@ nmcli con mod <연결이름> -ipv4.addresses 10.0.0.61/<prefix> -ipv4.addresses 
 | 1) 노드 커널 | 모든 노드 4.16 이상 |
 | 2) CNI | `ovnkube-node` 등 NetworkPolicy 지원 CNI 감지 |
 | 3) OpenTelemetry 흔적 | 없음 |
-| 4) 택배사 도달 | 클러스터 안 임시 파드에서 예전 IP·새 IP 443 모두 응답 (방화벽 적용 전 경로 확인) |
+| 4) 택배사 도달 | 클러스터 안 임시 파드에서 `COURIER_IP` 443 응답 (방화벽 적용 전 경로 확인) |
 | 5) 인증서 | `courier-ext/certs/ca.crt` 있음 |
 
 `점검 통과` 가 나오면 다음 단계로 갑니다. 4) 가 실패하면 5-5 와 노드→택배사 호스트 네트워크를 확인하세요.
@@ -693,10 +686,10 @@ shop-member-service     1.0.0   image-registry.openshift-image-registry.svc:5000
 1. `demo-shop`, `demo-infra` 네임스페이스 (Pod Security `restricted`)
 2. ImageStream 에 이미지 8개가 있는지 확인 — 없으면 "`./demo.sh push` 를 먼저 실행하세요" 로 중단
 3. 시크릿: `courier-ca`(택배사 CA 공개 인증서), `mysql-auth`·`redis-auth`(**무작위 비밀번호**, 처음 한 번만 생성)
-4. 사내 DNS(`ns1-corp-dns`·`ns2-corp-dns` 파드) → 택배사 도메인은 **예전 IP**, PG 도메인은 `PG_IP`
+4. 사내 DNS(`ns1-corp-dns`·`ns2-corp-dns` 파드) → 택배사 도메인은 `COURIER_IP`, PG 도메인은 `PG_IP`
    (예전 버전의 `courier-dns` 가 남아 있으면 지움)
 5. MySQL, Redis, 여덟 서비스 (이미지: `image-registry.openshift-image-registry.svc:5000/demo-shop/shop-*:<TAG>`)
-6. 방화벽: 배송 서비스는 사내 DNS 와 **예전 IP:443** 만 나갈 수 있음
+6. 방화벽: 배송 서비스는 **사내 주 DNS** 와 **택배사 IP:443** 만 나갈 수 있음 (보조 DNS 는 등록 누락 — 시나리오 ①)
 7. 서비스 간 인바운드 격리 정책
 8. 모든 파드 Ready 대기 → 부하 발생기 기동
 
@@ -712,18 +705,22 @@ shop-member-service     1.0.0   image-registry.openshift-image-registry.svc:5000
 `status` 정상 출력:
 
 ```
-[..] 사내 DNS 의 택배사 레코드 (서버별 조회)
-  primary   ns1-corp-dns(172.30.0.10)  api.courier.example → 10.0.0.61 (1ms)
-  secondary ns2-corp-dns(172.30.0.11)  api.courier.example → 10.0.0.61 (1ms)
-[..] 배송 서비스 파드에서 본 DNS 응답과 443 연결 (3초 제한)
-  DNS  api.courier.example -> 10.0.0.61
+[..] 사내 DNS 파드
+POD              ROLE        STATUS
+ns1-corp-dns-0   primary     Running
+ns2-corp-dns-0   secondary   Running
+[..] 배송 서비스 파드에서 택배사 도메인 조회와 443 연결 (OS 리졸버 — 주 → 보조 DNS)
+  DNS  api.courier.example -> 10.0.0.61 (0.0초)
   TCP  10.0.0.61:443 연결 성공
 [..] 방화벽 규칙
-RULE                          DESCRIPTION
-fw-allow-courier-10-0-0-61    택배사 API (api.courier.example) 10.0.0.61:443 허용
-fw-delivery-default           배송 서비스 egress 기본 규칙: 사내 DNS 만 허용, 그 외 차단
+RULE                         DESCRIPTION
+fw-allow-corp-dns-primary    사내 주 DNS (ns1-corp-dns) 53 허용
+fw-allow-courier-10-0-0-61   택배사 API (api.courier.example) 10.0.0.61:443 허용
+fw-delivery-default          배송 서비스 egress 기본 규칙: 허용 목록 외 모두 차단
 [..] 게이트웨이 → 주문 → 배송을 거친 배송 조회 1건
-  HTTP 200  0.02s
+  HTTP 200 0.02s
+[..] 체크아웃 1건 (결제 서비스는 방화벽이 없어 보조 DNS 로 정상)
+  HTTP 201 0.09s
 ```
 
 실시간 트래픽: `./demo.sh traffic` (`201 … POST /api/checkout`, `200 … GET …/tracking`, `200 … GET /api/products|members/…` 가 1초마다. Ctrl+C 로 종료)
@@ -731,7 +728,7 @@ fw-delivery-default           배송 서비스 egress 기본 규칙: 사내 DNS 
 ### 5-11. 정상 상태 데이터 쌓기
 
 촬영 전 **몇 시간 이상(가능하면 하루)** 그대로 둡니다. 데모 3에서 조회 기간을 넓혀
-예전 IP 로 정상 연결되던 모습과 비교하는 데 쓰입니다. 이 사이 Observ 화면에서 여덟 서비스가
+주 DNS 로 정상 조회되던 모습과 비교하는 데 쓰입니다. 이 사이 Observ 화면에서 여덟 서비스가
 서비스 목록에 언어 아이콘과 함께 나타나는지 확인해 두세요.
 
 ---
@@ -739,22 +736,24 @@ fw-delivery-default           배송 서비스 egress 기본 규칙: 사내 DNS 
 ## 6. 촬영 진행
 
 ```bash
-./demo.sh incident   # 촬영 15~30분 전: 택배사가 IP 변경 (사내 DNS 의 택배사 레코드 → 새 IP). 방화벽은 그대로
-./demo.sh status     # DNS -> 새 IP, TCP 연결 실패, HTTP 502 약 5초
+./demo.sh incident   # 촬영 15~30분 전: 주 DNS 파드 삭제 → 보조 DNS 로 넘어가지만 배송 서비스는 방화벽에 막힘
+./demo.sh status     # 주 DNS 파드 없음, 배송 파드 DNS 조회 실패, 배송 조회 502 (체크아웃은 201)
 #  ── 영상 ① 발견, ② 원인 촬영 ──
-./demo.sh firewall   # 데모 3: 방화벽에 새 IP 가 없음을 보여줌
-./demo.sh fix        # 데모 4: 방화벽에 새 IP:443 허용 (1~2분 뒤 화면에 반영)
-./demo.sh status     # TCP 연결 성공, HTTP 200
+./demo.sh firewall   # 데모 3: 방화벽에 주 DNS 만 있고 보조 DNS 가 없음을 보여줌
+./demo.sh fix        # 데모 4: 방화벽에 보조 DNS 허용 (1~2분 뒤 화면에 반영). 주 DNS 는 아직 죽은 채
+./demo.sh status     # DNS 조회 성공(보조 DNS), 배송 조회 200
 #  ── 영상 ③ 해결과 표준화 촬영 ──
-./demo.sh reset      # 다음 테이크 준비 (새 IP 규칙 삭제, 사내 DNS 택배사 레코드 → 예전 IP)
+./demo.sh reset      # 다음 테이크 준비 (보조 DNS 규칙 삭제, 주 DNS 다시 기동)
 ```
 
-| 명령 | DNS 응답 | 방화벽 허용 | 배송 조회 결과 |
-| --- | --- | --- | --- |
-| 배포 직후 / `reset` | 예전 IP | 예전 IP | 200, 수십 ms |
-| `incident` | **새 IP** | 예전 IP | **502, 약 5초** |
-| `fix` | 새 IP | 예전 IP + **새 IP** | 200, 수십 ms |
+| 명령 | 주 DNS 파드 | 방화벽 (배송 → DNS) | 배송 조회 결과 | 체크아웃 |
+| --- | --- | --- | --- | --- |
+| 배포 직후 / `reset` | Running | 주 DNS 만 | 200, 수십 ms | 201 |
+| `incident` | **없음** | 주 DNS 만 → **보조 DNS 로 가는 질의 차단** | **502** (DNS 조회 실패, 약 2~4초) | 201 (보조 DNS 사용) |
+| `fix` | 없음 | 주 DNS + **보조 DNS** | 200 (DNS 조회에 주 DNS 타임아웃만큼 더 걸림) | 201 |
 
+- 배송 조회가 실패하는 시간(2~4초)은 CNI 가 "파드 없는 주 DNS 서비스"로 가는 패킷을 **즉시 거부**하는지(2초: 보조 DNS 타임아웃만)
+  **버리는지**(4초: 주·보조 모두 타임아웃) 에 따라 다릅니다.
 - Observ 화면은 네임스페이스 필터를 **`demo-shop`** 으로, 트랜잭션 조회 소스 토글은 **eBPF** 로 둡니다.
 - 화면별 진행·멘트·촬영 전 체크리스트·쓰지 않는 표현: **[docs/runbook.md](docs/runbook.md)**
 - 촬영 중에는 `status` 대신 `firewall` 만 쓰는 것을 권장합니다 (`status` 는 배송 서비스 파드에서 연결을 1번 시도하므로 실패 연결이 1건 늘어남).
@@ -835,43 +834,56 @@ oc scale deploy/loadgen -n demo-infra --replicas=3
 해결(`pg-register`) 뒤에는 결제 서비스가 다음 요청부터 새 레코드를 받아 체크아웃이 201 로 돌아오고, DNS 탭의 NXDOMAIN 이 멈춥니다
 (PG 인증서에 새 도메인도 들어 있어 **등록만으로 회복**).
 
-### 6-3. 시나리오 3 — 주 DNS 장애
+### 6-3. 시나리오 1 자세히 보기 — 주 DNS 장애와 보조 DNS 차단
 
-> 사내 주 DNS 서버가 죽었다. 하지만 보조 DNS 가 있어서 서비스는 **정상 동작**한다.
+> 월요일 밤 사내 주 DNS 서버가 죽었다. 보조 DNS 가 있으니 괜찮을 줄 알았는데, 배송 조회만 전부 실패한다.
+> 방화벽 신청 때 배송 서비스의 DNS 허용에 **주 DNS 만** 넣고 보조 DNS 를 빠뜨렸던 것. 평소에는 주 DNS 가 답해서 아무도 몰랐다.
 
-주 DNS 파드(`ns1-corp-dns-0`)를 지웁니다 (StatefulSet 을 0 개로 줄여 다시 뜨지 않게). 결제·배송 서비스의 OS 리졸버는 주 DNS 에 닿지 못하면
-`/etc/resolv.conf` 의 두 번째 서버(보조 DNS)에 묻습니다. **앱 로그에는 아무 에러도 없습니다** — 전환은 사내 DNS 로그와 eBPF DNS 탭으로 확인합니다.
+`incident` 는 주 DNS 파드(`ns1-corp-dns-0`)를 지웁니다 (StatefulSet 을 0 개로 줄여 다시 뜨지 않게). 결제·배송 서비스의 OS 리졸버는
+주 DNS 에 닿지 못하면 `/etc/resolv.conf` 의 두 번째 서버(보조 DNS)에 묻습니다.
+
+| 서비스 | 보조 DNS 로 가는 질의 | 결과 |
+| --- | --- | --- |
+| 결제 (Node.js) | 나가는 방화벽 없음 → **통과** | 정상 (체크아웃 201) |
+| 배송 (Python) | 방화벽(`fw-*`)에 보조 DNS 없음 → **버려짐** | `Temporary failure in name resolution` → 배송 조회 502 |
+
+사내 DNS 로그로 보면 차이가 분명합니다 (터미널 두 개):
 
 ```bash
 # 터미널 1 — 사내 DNS 두 서버의 질의 로그
 ./demo.sh corpdns logs
 
 # 터미널 2
-./demo.sh dns-status          # 정상: 두 파드 Running, 체크아웃 201, 배송 조회 200
-./demo.sh dns-primary-down    # 사건: 주 DNS 파드 삭제
-./demo.sh dns-status          # 주 DNS 파드 없음, 그래도 체크아웃 201, 배송 조회 200
-./demo.sh dns-primary-up      # 복구: 주 DNS 파드 다시 기동
+./demo.sh incident
+./demo.sh fix
+./demo.sh reset
 ```
 
-**삭제 전** — 모든 질의를 주 DNS 가 받습니다:
+**평소** — 결제(`10.128.2.31`)·배송(`10.128.2.40`) 파드의 질의를 모두 주 DNS 가 받습니다:
 
 ```
 [pod/ns1-corp-dns-0/coredns] [INFO] 10.128.2.31 → ns1-corp-dns(primary) A api.pg.example. NOERROR 0.0001s
 [pod/ns1-corp-dns-0/coredns] [INFO] 10.128.2.40 → ns1-corp-dns(primary) A api.courier.example. NOERROR 0.0001s
 ```
 
-**`dns-primary-down` 뒤** — 주 DNS 로그가 끊기고 같은 결제(`10.128.2.31`)·배송(`10.128.2.40`) 파드의 질의가 보조 DNS 에 찍힙니다:
+**`incident` 뒤** — 주 DNS 로그가 끊기고, 보조 DNS 에는 **결제 파드의 질의만** 찍힙니다. 배송 파드의 질의는 방화벽에서 버려져 보조 DNS 에 도착하지 못합니다:
 
 ```
 [pod/ns2-corp-dns-0/coredns] [INFO] 10.128.2.31 → ns2-corp-dns(secondary) A api.pg.example. NOERROR 0.0003s
 [pod/ns2-corp-dns-0/coredns] [INFO] 10.128.2.31 → ns2-corp-dns(secondary) A member-service.demo-shop.svc.cluster.local. NOERROR 0.0008s (클러스터 DNS 로 전달)
+```
+
+**`fix` 뒤** — 배송 파드(`10.128.2.40`)의 질의도 보조 DNS 에 찍히고 배송 조회가 회복됩니다 (주 DNS 는 여전히 없음):
+
+```
 [pod/ns2-corp-dns-0/coredns] [INFO] 10.128.2.40 → ns2-corp-dns(secondary) A api.courier.example. NOERROR 0.0001s
 ```
 
-- 주 DNS 서비스에 파드가 없으면 쿠버네티스가 질의를 즉시 거부해, OS 리졸버가 **바로** 보조로 넘어갑니다 (지연 거의 없음).
-  CNI 가 거부 대신 패킷을 버리면 질의마다 2초(`timeout:2`) 기다린 뒤 보조로 넘어가 요청이 그만큼 느려집니다.
-- eBPF: 결제·배송 서비스 **DNS 탭**에서 질의 대상 서버가 보조 DNS 로 바뀌고, 오류율은 그대로 0 입니다.
-- 다음 테이크 전에 `./demo.sh dns-primary-up`.
+- 배송 서비스 로그: `{"level":"ERROR","service":"delivery-service","msg":"upstream call failed",…,"ip":"-","stage":"dns",…,"error":"gaierror(-3, 'Temporary failure in name resolution')"}`
+  — `ip: "-"` 는 **택배사로 연결을 시도조차 못 했다**는 뜻입니다.
+- eBPF: 배송 서비스 **DNS 탭**에서 택배사 도메인 조회가 응답 없이 실패(타임아웃), 택배사 IP 로 가는 TCP 연결은 **사라짐**.
+  결제 서비스 DNS 탭은 정상 (보조 DNS 가 답함).
+- `fix` 뒤에도 주 DNS 가 없는 동안은 조회마다 주 DNS 타임아웃만큼(최대 2초) 느립니다. `reset` 으로 주 DNS 를 되살리면 원래 속도로 돌아옵니다.
 
 ---
 
@@ -890,6 +902,9 @@ oc login ...               # 세션이 만료됐다면
 - **사내 DNS 가 파드(`ns1/ns2-corp-dns`)로 바뀐 버전으로 업데이트할 때**: `demo.env` 의 `CORP_DNS_MODE`·`CORP_DNS_PRIMARY`·`CORP_DNS_SECONDARY` 는
   지워도 됩니다(무시됨). `./demo.sh push` → `./demo.sh deploy` 하면 사내 DNS 파드가 생기고 예전 `courier-dns` 는 지워집니다.
   bastion 에 띄웠던 사내 DNS 컨테이너와 IP(`.63`·`.64`)는 더 이상 필요 없습니다 (`sudo podman rm -f corp-dns-primary corp-dns-secondary`).
+- **시나리오 ① 이 "주 DNS 장애 → 보조 DNS 방화벽 차단"으로 바뀐 버전으로 업데이트할 때**: `./demo.sh deploy` 한 번이면 방화벽 규칙이
+  새 구성(주 DNS 만 허용)으로 다시 만들어지고, 예전 "택배사 새 IP" 규칙은 지워집니다. `demo.env` 의 `COURIER_OLD_IP` 는 그대로 읽히고
+  (`COURIER_IP` 로 바꿔도 됨) `COURIER_NEW_IP` 는 무시됩니다. 택배사 호스트의 새 IP(`.62`)는 더 이상 필요 없습니다.
 - **네임스페이스 이름이 `shop` → `demo-shop` 으로 바뀐 버전으로 업데이트할 때**: 이전 `shop` 네임스페이스(파드·ImageStream 포함)는
   자동으로 지워지지 않습니다. 새 버전을 `push` → `deploy` 한 뒤 옛 네임스페이스를 지우세요:
   `oc delete namespace shop` (demo-infra 는 그대로 씁니다)
@@ -914,19 +929,16 @@ oc login ...               # 세션이 만료됐다면
 | `push` | 네임스페이스·ImageStream 생성 → 로그인 → 빌드·push → 태그 확인 | `scripts/build-images.sh --push` |
 | `deploy` | 전체 배포 (정상 상태) | `scripts/deploy.sh` |
 | `security` | 파드별 SCC·보안 설정·네트워크 정책 점검 | `scripts/security-check.sh` |
-| `status` | DNS·연결·방화벽·배송 조회 1건 요약 | `scripts/scenario.sh status` |
-| `incident` | 사내 DNS 의 택배사 레코드를 새 IP 로 (사건 발생) | `scripts/scenario.sh incident` |
-| `firewall` | 방화벽 규칙 목록 | `scripts/scenario.sh firewall` |
-| `fix` | 방화벽에 새 IP 허용 | `scripts/scenario.sh fix` |
-| `reset` / `baseline` | 새 IP 규칙 삭제, DNS 를 예전 IP 로 | `scripts/scenario.sh reset` |
+| `status` | 사내 DNS 파드·배송 파드의 DNS 조회와 연결·방화벽·배송 조회·체크아웃 1건씩 | `scripts/scenario.sh status` |
+| `incident` | ① 사건: 주 DNS 파드 삭제 → 배송 서비스는 보조 DNS 가 방화벽에 막혀 실패 | `scripts/scenario.sh incident` |
+| `firewall` | 방화벽 규칙 목록 (주 DNS 만 있고 보조 DNS 없음) | `scripts/scenario.sh firewall` |
+| `fix` | ① 해결: 방화벽에 보조 DNS 허용 | `scripts/scenario.sh fix` |
+| `reset` / `baseline` | ① 되돌리기: 보조 DNS 규칙 삭제, 주 DNS 다시 기동 | `scripts/scenario.sh reset` |
 | `traffic` | 부하 발생기 로그 실시간 | `scripts/scenario.sh traffic` |
 | `pg-missing` | ② 사건: 결제 서비스 PG 도메인을 사내 DNS 에 없는 새 도메인으로 | `scripts/scenario.sh pg-missing` |
 | `pg-register` | ② 해결: 사내 DNS 에 새 도메인 등록 | `scripts/scenario.sh pg-register` |
 | `pg-reset` | ② 되돌리기 | `scripts/scenario.sh pg-reset` |
 | `pg-status` | 사내 DNS 서버별 조회 + 체크아웃 1건 | `scripts/scenario.sh pg-status` |
-| `dns-primary-down` | ③ 사건: 주 DNS 파드 삭제 (보조로 정상 동작) | `scripts/scenario.sh dns-primary-down` |
-| `dns-primary-up` | ③ 복구: 주 DNS 파드 다시 기동 | `scripts/scenario.sh dns-primary-up` |
-| `dns-status` | 사내 DNS 파드·서버별 조회 + 체크아웃·배송 조회 1건씩 | `scripts/scenario.sh dns-status` |
 | `corpdns <명령>` | 사내 DNS 조작: `status`·`logs [primary\|secondary\|all]`·`records`·`record-add [도메인] [IP]`·`record-remove [도메인]`·`primary-down`·`primary-up`·`up`·`down` | `scripts/corpdns.sh` |
 | `restart` | 여덟 서비스 재시작 | `demo.sh` |
 | `images` | ImageStream·태그·pull 주소 | `demo.sh` |
@@ -970,12 +982,13 @@ OCP 내부 레지스트리는 **push 하는 주소와 pull 하는 주소가 다�
 | --- | --- | --- |
 | OpenTelemetry 에이전트·SDK 를 설치하지 않는다. 트랜잭션 조회 소스 토글은 eBPF | eBPF 수집만 보여주기 위해 | 모든 `services/*` 에 모니터링 의존성 없음. `check` 가 흔적 점검 |
 | ClickHouse 와 노드 에이전트의 traces endpoint 설정 | 없으면 T-Map·트랜잭션 조회가 비어 있음 | Observ 설치 측 설정 (이 저장소 밖) |
-| 택배사 도메인은 IP **1개**만 돌려준다 | 여러 개면 실패 목적지가 `도메인:443` 으로 합쳐져 새 IP 가 안 보임 | 사내 DNS 존에 A 레코드 한 줄 (`corp-dns-zone`), `scenario.sh` 가 항상 한 줄로 교체 |
+| 택배사 도메인은 IP **1개**만 돌려준다 | 여러 개면 연결 목적지가 `도메인:443` 으로 합쳐져 IP 가 안 보임 | 사내 DNS 존에 A 레코드 한 줄 (`corp-dns-zone`) |
+| DNS 조회는 **2초 타임아웃, 재시도 1번** (`timeout:2 attempts:1`) | glibc 기본값(5초×2회)이면 DNS 실패가 수십 초 뒤에야 기록됨 | 결제·배송 파드 `dnsConfig.options` |
 | 배송 서비스는 택배사 호출에 **5초 타임아웃**, 실패하면 **5xx** | 커널 기본 재시도에 맡기면 약 127초 뒤에야 실패 1건 기록 | `delivery-service/app.py` — `COURIER_TIMEOUT_SECONDS=5`, 실패 시 503 |
 | 배송 서비스는 **주문 서비스가 호출**한다 | 브라우저가 직접 호출하면 오류·지연이 집계되지 않음 | loadgen → 게이트웨이 → 주문 → 배송. 타임아웃은 바깥쪽일수록 길게 (배송→택배사 5초 < 주문→배송 10초 < 게이트웨이→주문 15초 < loadgen 20초) |
 | 외부 HTTPS 호출은 **Python(시스템 libssl)** 이 맡는다 (다른 서비스는 외부 호출 없음) | Java(JSSE)·Node.js(OpenSSL 정적 링크)의 HTTPS 내용은 eBPF 로 볼 수 없음 | `python:3.12-slim` — `_ssl` 이 `libssl.so.3` 동적 링크 |
 | Go 서비스는 **Go 1.17 이상, 심볼 유지** 빌드 | 그래야 언어가 Go 로 표시됨 | Go 1.22, `-ldflags "-s -w"` 미사용 |
-| 방화벽 차단 전 **정상 상태 데이터**를 미리 쌓아 둔다 | 예전 IP 로 연결되던 모습과 비교 | `deploy` 직후가 정상 상태. 몇 시간 이상 유지 |
+| 사건 전 **정상 상태 데이터**를 미리 쌓아 둔다 | 주 DNS 로 정상 조회·연결되던 모습과 비교 | `deploy` 직후가 정상 상태. 몇 시간 이상 유지 |
 
 그 밖에 화면을 깨끗하게 하려고 넣은 장치:
 
@@ -985,15 +998,15 @@ OCP 내부 레지스트리는 **push 하는 주소와 pull 하는 주소가 다�
 - **프로브 잡음 제거**: readinessProbe 는 `tcpSocket` → kubelet 의 HTTP 헬스체크가 지표에 섞이지 않습니다.
 - **데모 장치 분리**: 부하 발생기·사내 DNS 는 `demo-infra` → `demo-shop` 으로 필터하면 여덟 서비스(+MySQL·Redis)만 보입니다.
 - **평문 Redis**: 재고 서비스는 외부 라이브러리 없이 RESP 로 Redis 와 평문 통신 → Redis 명령이 보입니다.
-- **확실한 드롭**: 차단은 거부(RST)가 아니라 SYN drop → "연결 실패(타임아웃)"로 기록되고 배송 서비스 요청은 약 5초에 끝납니다.
+- **확실한 드롭**: 방화벽(NetworkPolicy)은 거부가 아니라 조용히 버림 → 보조 DNS 로 간 질의는 응답 없이 2초 뒤 타임아웃됩니다.
 
 ### eBPF 로 보이지 않는 것 (대본 주의)
 
 | 쓰지 않는 표현 | 대신 |
 | --- | --- |
-| "택배사 API 호출이 5초 타임아웃" | "배송 서비스 요청이 5초 뒤 실패" — 응답 전에 끊긴 외부 호출은 기록이 남지 않음 |
+| "택배사 API 호출이 실패했다" | "택배사 도메인을 찾지 못해 연결을 시도조차 못 했다" — 시나리오 ① 에서는 택배사로 가는 연결 자체가 없음 |
 | "외부 API 호출의 오류율·지연이 높다" | "연결 실패" — 연결이 막히면 HTTP 요청 자체가 없음 |
-| "DNS 가 새 IP 를 돌려받고 있다 (DNS 화면에서)" | 새 IP 는 네트워크 탭의 **실패한 목적지**로 보여줌 |
+| "방화벽이 보조 DNS 를 막았다 (화면에서)" | 방화벽은 eBPF 화면에 따로 보이지 않음 — DNS 탭의 **응답 없는 조회**와 `./demo.sh firewall` 규칙 목록으로 보여줌 |
 | "토폴로지에서 HTTP·DNS·MySQL 이 구분되어 보인다" | SLO 탭 Client 표, DNS 탭, MySQL 탭에서 보여줌 |
 
 ---
@@ -1030,8 +1043,10 @@ OCP 내부 레지스트리는 **push 하는 주소와 pull 하는 주소가 다�
 
 | 정책 | 방향 | 허용 내용 |
 | --- | --- | --- |
-| `fw-delivery-default` | egress | 배송 → 사내 DNS(`ns1/ns2-corp-dns` 파드 1053/UDP·TCP) **만** |
-| `fw-allow-courier-<예전IP>` | egress | 배송 → 택배사 예전 IP 443 |
+| `fw-delivery-default` | egress | 배송 서비스의 나가는 연결 기본 차단 (아래 허용 규칙만 통과) |
+| `fw-allow-corp-dns-primary` | egress | 배송 → 사내 **주** DNS(`ns1-corp-dns` 파드) 1053/UDP·TCP |
+| `fw-allow-courier-<택배사IP>` | egress | 배송 → 택배사 IP 443 |
+| `fw-allow-corp-dns-secondary` | egress | 배송 → 사내 **보조** DNS — `fix` 가 추가, `reset` 이 삭제 (평소에는 없음 = 시나리오 ① 의 원인) |
 | `default-deny-ingress` | ingress | `demo-shop`, `demo-infra` 기본 차단 |
 | `allow-gateway-from-loadgen` | ingress | loadgen → 게이트웨이 8080 |
 | `allow-order-from-gateway` | ingress | 게이트웨이 → 주문 8080 |
@@ -1100,14 +1115,14 @@ oc adm policy add-scc-to-user privileged -z <agent-serviceaccount> -n <agent-nam
 | 경로 끝이 `pg(…) [… SSLHandshakeException …]` / `unable to verify the first certificate` | PG 인증서를 데모 CA 로 검증하지 못함 — `./demo.sh certs` 후 `sudo ./courier-ext/run.sh up`, `courier-ca` 시크릿이 같은 CA 인지 (`./demo.sh deploy`) |
 | 배포 후 체크아웃이 전부 502, 경로 끝이 `pg(api.pg.example) [ENOTFOUND …]` | 사내 DNS 에 PG 도메인이 없음 — `pg-missing` 을 켜 둔 상태인지(`./demo.sh pg-reset`), `./demo.sh corpdns records` |
 | 체크아웃이 전부 502, 경로 끝이 `member-service [ENOTFOUND …]` | 사내 DNS 의 `cluster.local` 전달이 안 됨 — 사내 DNS 파드가 예전 설정으로 떠 있으면 `kubectl -n demo-infra rollout restart statefulset ns1-corp-dns ns2-corp-dns` (지금 버전의 `deploy` 는 설정이 바뀌면 자동 재시작). 그래도 안 되면 클러스터 도메인이 `cluster.local` 인지, 사내 DNS 파드 → 클러스터 DNS 통신 확인 |
-| 요청이 항상 2초씩 느림 | 주 DNS 가 없고 CNI 가 질의를 버리는 중 — `dns-primary-down` 상태인지(`./demo.sh dns-primary-up`) |
+| 요청이 항상 2초씩 느림 | 주 DNS 가 없고 CNI 가 질의를 버리는 중 — `incident`/`fix` 상태인지 (`./demo.sh reset`) |
 | 택배사·PG 연결이 됐다 안 됐다 함 | 같은 데모용 IP 가 두 서버에 붙어 있음 → ['주의'](#주의-같은-ip-를-두-서버에-붙이지-마세요) |
 | `check` 의 `[클러스터 → PG] … HTTP 404` | `PG_IP` 가 nginx 가 듣는 IP 가 아님 (다른 웹서버가 응답) → `PG_IP=` 로 비우기 |
 | `check` 의 점검 파드가 `violates PodSecurity "restricted:latest"` | 이전 버전 스크립트. `git pull` (점검 파드에 restricted 보안 설정이 들어간 버전) |
 | 어디서 실패하는지 모르겠음 | `./demo.sh status` 의 `실패 경로`, 또는 `oc -n demo-shop logs deploy/gateway-service \| jq -r 'select(.msg=="upstream call failed") \| .path'` 를 보면 끝까지 보입니다 ([2. 구성](#애플리케이션-로그로-실패-지점-찾기)) |
-| `incident` 후에도 배송 조회가 200 | 새 IP 가 이미 허용됨 (`./demo.sh firewall` 에 새 IP 규칙이 있으면 `./demo.sh reset` 후 다시) |
-| 장애 시 5초가 아니라 즉시 실패 | 경로 어딘가에서 RST/ICMP 거부 중. 택배사 호스트 방화벽이 새 IP 를 거부하고 있지 않은지 확인 |
-| 정상 상태에서도 연결 실패 | 택배사 호스트 nginx, 예전 IP 라우팅 확인 (`check` 4번) |
+| `incident` 후에도 배송 조회가 200 | 보조 DNS 가 이미 허용됨 (`./demo.sh firewall` 에 `fw-allow-corp-dns-secondary` 가 있으면 `./demo.sh reset` 후 다시) |
+| `incident` 후 배송 조회가 `Temporary failure` 가 아니라 즉시 실패/성공 | 배송 서비스 파드가 사내 DNS 를 쓰는지(`oc -n demo-shop exec deploy/delivery-service -- cat /etc/resolv.conf`), CNI 가 NetworkPolicy 를 집행하는지(`check` 2번) |
+| 정상 상태에서도 연결 실패 | 택배사 호스트 nginx, 택배사 IP 라우팅 확인 (`check` 4번) |
 | 실패 목적지가 IP 가 아니라 `도메인:443` 으로 보임 | 사내 DNS 가 택배사 도메인에 IP 를 여러 개 돌려주는지: `./demo.sh corpdns records` |
 | DNS 탭에 NXDOMAIN 이 보임 | 배송 서비스 파드 `/etc/resolv.conf` 에 search 가 없고 `ndots:1` 인지 확인 |
 | T-Map·트랜잭션 조회가 비어 있음 | ClickHouse, 노드 에이전트 traces endpoint 설정 |
@@ -1150,7 +1165,7 @@ oc -n demo-shop logs deploy/order-service -f
 
 # [택배사 호스트]
 sudo ./run.sh down
-sudo ./setup-ips.sh del <NIC> <COURIER_NEW_IP>/<prefix>
+sudo ./setup-ips.sh del <NIC> <COURIER_IP>/<prefix>    # 택배사용 IP 를 따로 붙였을 때만
 ```
 
 내부 레지스트리 default route 를 다시 닫으려면(선택, cluster-admin):

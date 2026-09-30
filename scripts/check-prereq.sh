@@ -48,11 +48,9 @@ fi
 
 info "4) 택배사 IP 로 443 연결 (방화벽 적용 전 경로 확인)"
 # demo.env.example 의 예시 IP 를 그대로 쓰고 있으면 먼저 알려준다
-for ip in "$COURIER_OLD_IP" "$COURIER_NEW_IP"; do
-  if [[ "$ip" == 10.0.0.61 || "$ip" == 10.0.0.62 ]]; then
-    warn "  demo.env 의 택배사 IP(${ip})가 예시값입니다. 실제 택배사 호스트 IP 로 바꿨는지 확인하세요."
-  fi
-done
+if [[ "$COURIER_IP" == 10.0.0.61 ]]; then
+  warn "  demo.env 의 택배사 IP(${COURIER_IP})가 예시값입니다. 실제 택배사 호스트 IP 로 바꿨는지 확인하세요."
+fi
 
 # 실패 메시지를 보고 원인을 추정한다
 probe_hint() {
@@ -67,7 +65,7 @@ probe_hint() {
     *"No route to host"*|*"Network is unreachable"*|*"Host is unreachable"*)
       echo "경로 없음 → 노드에서 해당 IP 대역으로 라우팅이 되는지 확인" ;;
     *"HTTP 404"*|*"HTTP 5"*)
-      echo "다른 웹서버가 응답함 → 그 IP:443 이 이 데모의 nginx 가 아님. PG_IP 는 nginx 가 듣는 IP(비우면 COURIER_OLD_IP)여야 함" ;;
+      echo "다른 웹서버가 응답함 → 그 IP:443 이 이 데모의 nginx 가 아님. PG_IP 는 nginx 가 듣는 IP(비우면 COURIER_IP)여야 함" ;;
     *"timed out waiting"*|*ImagePull*|*ErrImage*)
       echo "테스트 파드가 뜨지 못함 → 노드가 docker.io 이미지를 받을 수 있는지 확인 (README 12. 폐쇄망)" ;;
     *) echo "위 메시지를 확인하세요" ;;
@@ -82,7 +80,7 @@ clean_probe() {
 
 # 4-a) 작업 PC(클러스터 밖)에서
 if command -v curl >/dev/null; then
-  for ip in "$COURIER_OLD_IP" "$COURIER_NEW_IP"; do
+  for ip in "$COURIER_IP"; do
     out="$(LC_ALL=C curl -sSk -m 5 -o /dev/null -w 'HTTP %{http_code}' --resolve "${COURIER_DOMAIN}:443:${ip}" \
            "https://${COURIER_DOMAIN}/health" 2>&1 || true)"
     out="$(printf '%s' "$out" | tr '\n' ' ' | sed 's/  */ /g; s/ $//')"
@@ -96,7 +94,7 @@ if command -v curl >/dev/null; then
 fi
 
 # 4-b) 클러스터 안(임시 파드)에서 — 이 결과가 통과해야 한다
-for ip in "$COURIER_OLD_IP" "$COURIER_NEW_IP"; do
+for ip in "$COURIER_IP"; do
   out="$(probe courier-probe docker.io/curlimages/curl:8.10.1 \
          sh -c "curl -sSk -m 5 -o /dev/null -w 'HTTP %{http_code}' --resolve '${COURIER_DOMAIN}:443:${ip}' 'https://${COURIER_DOMAIN}/health' 2>&1" \
          2>&1 || true)"
@@ -112,7 +110,7 @@ done
 
 info "5) 사내 DNS (ns1/ns2-corp-dns) — PG 도메인·택배사 도메인, 그리고 외부 PG — 클러스터 안에서"
 # 사내 DNS 가 답해야 하는 레코드: "도메인 기대IP"
-dns_expect=("${PG_DOMAIN} ${PG_IP}" "${COURIER_DOMAIN} ${COURIER_OLD_IP}")
+dns_expect=("${PG_DOMAIN} ${PG_IP}" "${COURIER_DOMAIN} ${COURIER_IP}")
 # 사내 DNS 파드는 결제·배송 서비스만 들어올 수 있으므로(demo-infra 인바운드 기본 차단) 결제 파드에서 조회한다
 if [[ -z "$CORP_DNS_PRIMARY" ]] || ! kc -n "$APP_NS" get deploy payment-service >/dev/null 2>&1; then
   info "  사내 DNS 파드(${CORP_DNS_PRIMARY_NAME}, ${CORP_DNS_SECONDARY_NAME})는 deploy 때 만들어집니다 (조회 점검은 배포 후 다시 check)"
@@ -125,9 +123,9 @@ else
       else
         warn "  [사내 DNS ${role} ${server}] ${domain} → ${result} (기대: ${want})"
         if [[ "$domain" == "$COURIER_DOMAIN" ]]; then
-          warn "      → 정상 상태에서는 예전 IP 여야 함 (incident 중이면 새 IP 가 정상 — './demo.sh reset')"
+          warn "      → './demo.sh corpdns record-add ${COURIER_DOMAIN} ${COURIER_IP}' 로 다시 등록"
         else
-          warn "      → './demo.sh corpdns status' 로 파드·레코드 확인 (주 DNS 를 내렸다면 './demo.sh dns-primary-up')"
+          warn "      → './demo.sh corpdns status' 로 파드·레코드 확인 (시나리오 1 사건 중이면 './demo.sh reset')"
         fi
         fail=1
       fi
@@ -166,7 +164,7 @@ if [[ -n "$secret_ca" ]]; then
 fi
 
 # nginx 가 내미는 택배사·PG 인증서가 지금 CA 로 검증되는지 (작업 PC 에서)
-for pair in "${COURIER_DOMAIN}:${COURIER_OLD_IP}" "${PG_DOMAIN}:${PG_IP}"; do
+for pair in "${COURIER_DOMAIN}:${COURIER_IP}" "${PG_DOMAIN}:${PG_IP}"; do
   d="${pair%%:*}"; ip_="${pair#*:}"
   [[ -f "$ROOT/courier-ext/certs/ca.crt" ]] || break
   if out="$(LC_ALL=C curl -sS -m 5 -o /dev/null --cacert "$ROOT/courier-ext/certs/ca.crt" --resolve "${d}:443:${ip_}" "https://${d}/health" 2>&1)"; then

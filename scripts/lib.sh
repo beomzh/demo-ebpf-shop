@@ -26,13 +26,14 @@ load_env() {
   [[ -f "$f" ]] || die "$f 가 없습니다. 'cp demo.env.example demo.env' 후 값을 채우세요."
   # shellcheck disable=SC1090
   set -a; source "$f"; set +a
-  : "${TAG:?}" "${COURIER_DOMAIN:?}" "${COURIER_OLD_IP:?}" "${COURIER_NEW_IP:?}"
+  # 택배사 API IP. 예전 이름 COURIER_OLD_IP 도 읽는다 (COURIER_NEW_IP 는 더 이상 쓰지 않음)
+  COURIER_IP="${COURIER_IP:-${COURIER_OLD_IP:-}}"
+  : "${TAG:?}" "${COURIER_DOMAIN:?}" "${COURIER_IP:?demo.env 에 COURIER_IP 를 채우세요}"
   : "${CLI:=auto}" "${REGISTRY_MODE:=ocp-internal}" "${REGISTRY:=}"
   : "${CONTAINER_ENGINE:=auto}" "${REGISTRY_TLS_VERIFY:=false}" "${PLATFORM:=linux/amd64}"
   : "${LOADGEN_ORDER_INTERVAL:=1}" "${LOADGEN_TRACKING_INTERVAL:=1}" "${LOADGEN_REPLICAS:=1}" "${LOADGEN_BROWSE_INTERVAL:=1}"
-  [[ "$COURIER_OLD_IP" != "$COURIER_NEW_IP" ]] || die "COURIER_OLD_IP 와 COURIER_NEW_IP 가 같습니다."
   : "${PG_DOMAIN:=api.pg.example}" "${PG_IP:=}" "${PG_UNREGISTERED_DOMAIN:=api-new.pg.example}"
-  PG_IP="${PG_IP:-$COURIER_OLD_IP}"
+  PG_IP="${PG_IP:-$COURIER_IP}"
   if [[ -n "${CORP_DNS_MODE:-}" && "${CORP_DNS_MODE}" != cluster ]]; then
     warn "CORP_DNS_MODE=${CORP_DNS_MODE} 는 더 이상 쓰지 않습니다. 사내 DNS 는 항상 demo-infra 의 파드(ns1/ns2-corp-dns)입니다 (demo.env 에서 지워도 됨)."
   fi
@@ -153,8 +154,8 @@ render() {
     -e "s#__REGISTRY__#${reg}#g" \
     -e "s#__TAG__#${TAG}#g" \
     -e "s#__COURIER_DOMAIN__#${COURIER_DOMAIN}#g" \
-    -e "s#__COURIER_OLD_IP_DASHED__#$(dashed "$COURIER_OLD_IP")#g" \
-    -e "s#__COURIER_OLD_IP__#${COURIER_OLD_IP}#g" \
+    -e "s#__COURIER_IP_DASHED__#$(dashed "$COURIER_IP")#g" \
+    -e "s#__COURIER_IP__#${COURIER_IP}#g" \
     -e "s#__CORP_DNS_PRIMARY__#${CORP_DNS_PRIMARY}#g" \
     -e "s#__CORP_DNS_SECONDARY__#${CORP_DNS_SECONDARY}#g" \
     -e "s#__LOADGEN_ORDER_INTERVAL__#${LOADGEN_ORDER_INTERVAL}#g" \

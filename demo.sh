@@ -17,12 +17,13 @@ usage() {
   deploy           클러스터에 배포 (정상 상태로 시작)
   security         배포 후 보안 점검 (SCC·securityContext·네트워크 정책)
 
-[시나리오 ① 방화벽 차단 — 배송 서비스 → 외부 택배사]
-  status           현재 상태 (사내 DNS 의 택배사 레코드·연결 가능 여부·방화벽 규칙·배송 조회 1건)
-  incident         사건: 택배사가 IP 변경 (사내 DNS 택배사 레코드 → 새 IP, 방화벽은 예전 IP 만 허용)
-  firewall         방화벽 규칙 목록 (원인 확인)
-  fix              해결: 방화벽에 새 IP 허용
-  reset            다음 테이크 준비 (새 IP 규칙 삭제, 택배사 레코드 → 예전 IP). baseline 과 같음
+[시나리오 ① 주 DNS 장애 → 보조 DNS 가 방화벽에 막힘 — 배송 서비스 → 외부 택배사]
+  status           현재 상태 (사내 DNS 파드·배송 파드의 DNS 조회와 연결·방화벽 규칙·배송 조회·체크아웃 1건씩)
+  incident         사건: 주 DNS 파드(ns1-corp-dns-0) 삭제(replica=0) → 보조 DNS(ns2)로 넘어가지만 (os resolv 타임아웃 2초)
+                   배송 서비스는 방화벽에 보조 DNS 가 없어 택배사 도메인을 못 찾음
+  firewall         방화벽 규칙 목록 (원인 확인: 주 DNS 만 허용, 보조 DNS 없음)
+  fix              해결: 방화벽에 보조 DNS 허용
+  reset            다음 테이크 준비 (보조 DNS 규칙 삭제, 주 DNS 다시 기동). baseline 과 같음
   traffic          부하 발생기 로그 실시간 보기 (Ctrl+C 로 종료)
 
 [시나리오 ② DNS 이름 변경 → 없는 이름 조회 — 결제 서비스 → 외부 PG사]
@@ -30,11 +31,6 @@ usage() {
   pg-register      해결: 사내 DNS 에 새 도메인 등록 → 재시작 없이 회복
   pg-reset         원래 도메인으로 (다음 테이크 준비)
   pg-status        사내 DNS 서버별 조회 + 체크아웃 1건
-
-[시나리오 ③ 주 DNS 장애 — 주 DNS 파드 삭제, 보조 DNS 로 정상 동작]
-  dns-primary-down 주 DNS 파드(ns1-corp-dns-0) 삭제 → 보조 DNS(ns2) 가 응답, 서비스 정상
-  dns-primary-up   주 DNS 파드 다시 기동
-  dns-status       사내 DNS 파드·서버별 조회 + 체크아웃 1건 + 배송 조회 1건
 
 [사내 DNS]
   corpdns <명령>   status | logs [primary|secondary|all] | records | record-add [도메인] [IP] | record-remove [도메인]
@@ -75,7 +71,7 @@ case "$cmd" in
   push)           $S/build-images.sh --push ;;
   deploy)         $S/deploy.sh ;;
   security)       $S/security-check.sh ;;
-  status|incident|fix|reset|baseline|firewall|traffic|pg-missing|pg-register|pg-reset|pg-status|dns-primary-down|dns-primary-up|dns-status)
+  status|incident|fix|reset|baseline|firewall|traffic|pg-missing|pg-register|pg-reset|pg-status)
                   $S/scenario.sh "$cmd" ;;
   corpdns)        $S/corpdns.sh "$@" ;;
   restart)

@@ -3,8 +3,8 @@
 #   sudo ./run.sh up | down | logs | status
 #
 # nginx 가 443 을 받을 IP:
-#   1) LISTEN_IPS 환경변수 (공백 구분)          sudo LISTEN_IPS="192.168.200.61 192.168.200.62" ./run.sh up
-#   2) 없으면 ../demo.env 의 COURIER_OLD_IP, COURIER_NEW_IP  (bastion 을 택배사 호스트로 쓸 때)
+#   1) LISTEN_IPS 환경변수 (공백 구분)          sudo LISTEN_IPS="10.0.0.61" ./run.sh up
+#   2) 없으면 ../demo.env 의 COURIER_IP(예전 이름 COURIER_OLD_IP)와 PG_IP  (bastion 을 택배사 호스트로 쓸 때)
 #   3) 둘 다 없으면 호스트의 모든 IP (0.0.0.0:443)
 # haproxy 등 다른 프로그램이 443 을 쓰는 호스트에서는 1) 또는 2) 로 IP 를 지정해야 충돌하지 않는다.
 #
@@ -39,7 +39,7 @@ listen_ips() {
   if [[ -n "${LISTEN_IPS:-}" ]]; then echo "$LISTEN_IPS"; return; fi
   if [[ -f ../demo.env ]]; then
     # shellcheck disable=SC1091
-    ( set -a; source ../demo.env; echo "${COURIER_OLD_IP:-} ${COURIER_NEW_IP:-}" )
+    ( set -a; source ../demo.env; c="${COURIER_IP:-${COURIER_OLD_IP:-}}"; p="${PG_IP:-$c}"; [[ "$p" == "$c" ]] && p=""; echo "$c $p" )
   fi
 }
 
